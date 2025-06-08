@@ -1,6 +1,6 @@
 {
   "name": "@elizaos/plugin-solana",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -51,12 +51,72 @@
   "agentConfig": {
     "pluginType": "elizaos:plugin:1.0.0",
     "pluginParameters": {
+      "SOL_ADDRESS": {
+        "type": "string",
+        "description": "The mint/contract address used to represent native SOL when interacting with token swap logic.",
+        "required": true,
+        "sensitive": false
+      },
       "SOLANA_RPC_URL": {
         "type": "string",
-        "description": "URL of the Solana RPC endpoint the application connects to. If not set, defaults to the mainnet-beta public RPC.",
+        "description": "The Solana RPC endpoint the application should connect to.",
         "required": false,
         "default": "https://api.mainnet-beta.solana.com",
         "sensitive": false
+      },
+      "WALLET_SECRET_SALT": {
+        "type": "string",
+        "description": "Salt used to derive or encrypt the Solana wallet’s secret key; required if the direct secret key is not provided.",
+        "required": false,
+        "sensitive": false
+      },
+      "WALLET_SECRET_KEY": {
+        "type": "string",
+        "description": "Base58-encoded Solana wallet secret (private) key; required if WALLET_SECRET_SALT is not supplied.",
+        "required": false,
+        "sensitive": true
+      },
+      "WALLET_PUBLIC_KEY": {
+        "type": "string",
+        "description": "Base58-encoded Solana wallet public key corresponding to WALLET_SECRET_KEY.",
+        "required": false,
+        "sensitive": false
+      },
+      "SOLANA_PUBLIC_KEY": {
+        "type": "string",
+        "description": "Alternative name accepted by runtime for the wallet’s public key.",
+        "required": false,
+        "sensitive": false
+      },
+      "SLIPPAGE": {
+        "type": "string",
+        "description": "Maximum acceptable slippage (likely as a percentage or basis points) for Solana swaps/transactions.",
+        "required": true,
+        "sensitive": false
+      },
+      "HELIUS_API_KEY": {
+        "type": "string",
+        "description": "API key for accessing the Helius Solana infrastructure services.",
+        "required": true,
+        "sensitive": true
+      },
+      "BIRDEYE_API_KEY": {
+        "type": "string",
+        "description": "API key for accessing Birdeye market data services.",
+        "required": true,
+        "sensitive": true
+      },
+      "SOLANA_PRIVATE_KEY": {
+        "type": "string",
+        "description": "The Solana wallet private key in base58 or base64 format, used to create a Keypair when private key access is required.",
+        "required": false,
+        "sensitive": true
+      },
+      "WALLET_PRIVATE_KEY": {
+        "type": "string",
+        "description": "Alternative variable name for the Solana wallet private key in base58 or base64.",
+        "required": false,
+        "sensitive": true
       }
     }
   }
