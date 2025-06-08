@@ -1,6 +1,6 @@
 {
   "name": "@elizaos/plugin-solana",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -51,60 +51,12 @@
   "agentConfig": {
     "pluginType": "elizaos:plugin:1.0.0",
     "pluginParameters": {
-      "WALLET_SECRET_SALT": {
-        "type": "string",
-        "description": "Optional salt value used in conjunction with the wallet secret key for secure key derivation or encryption.",
-        "required": false
-      },
-      "WALLET_SECRET_KEY": {
-        "type": "string",
-        "description": "Private secret key for the wallet that the plugin will use to sign transactions.",
-        "required": true
-      },
-      "WALLET_PUBLIC_KEY": {
-        "type": "string",
-        "description": "Public key for the wallet associated with WALLET_SECRET_KEY, used as the sender address for transactions.",
-        "required": true
-      },
-      "SOL_ADDRESS": {
-        "type": "string",
-        "description": "Solana address that the plugin will operate on or reference for token operations.",
-        "required": true
-      },
-      "SLIPPAGE": {
-        "type": "string",
-        "description": "Maximum allowed slippage percentage for swap or trading operations.",
-        "required": true
-      },
       "SOLANA_RPC_URL": {
         "type": "string",
-        "description": "URL of the Solana RPC endpoint the plugin will connect to for blockchain interactions.",
-        "required": true
-      },
-      "HELIUS_API_KEY": {
-        "type": "string",
-        "description": "API key for accessing the Helius enhanced RPC or analytics services.",
-        "required": true
-      },
-      "BIRDEYE_API_KEY": {
-        "type": "string",
-        "description": "API key for accessing Birdeye price feeds and analytics.",
-        "required": true
-      },
-      "SOLANA_PUBLIC_KEY": {
-        "type": "string",
-        "description": "Alternative setting name that can supply the wallet's public key before falling back to WALLET_PUBLIC_KEY.",
-        "required": false
-      },
-      "SOLANA_PRIVATE_KEY": {
-        "type": "string",
-        "description": "Base58 or base64 encoded private key for the Solana wallet, used when a full keypair is required.",
-        "required": false
-      },
-      "WALLET_PRIVATE_KEY": {
-        "type": "string",
-        "description": "Alternative environment variable for the Solana wallet private key, checked if SOLANA_PRIVATE_KEY is not set.",
-        "required": false
+        "description": "URL of the Solana RPC endpoint the application connects to. If not set, defaults to the mainnet-beta public RPC.",
+        "required": false,
+        "default": "https://api.mainnet-beta.solana.com",
+        "sensitive": false
       }
     }
   }
