@@ -32,6 +32,8 @@ export const solanaPlugin: Plugin = {
 
       const me = {
         name: 'Solana services',
+        chain: 'solana',
+        service: SOLANA_SERVICE_NAME,
       };
       traderChainService.registerChain(me);
 
