@@ -19,6 +19,10 @@ const PROVIDER_CONFIG = {
   },
 };
 
+const METADATA_PROGRAM_ID = new PublicKey(
+  'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s' // Metaplex Token Metadata Program ID
+);
+
 /**
  * Service class for interacting with the Solana blockchain and accessing wallet data.
  * @extends Service
@@ -158,15 +162,66 @@ export class SolanaService extends Service {
    * @returns {Promise<any[]>} A promise that resolves to an array of token accounts.
    */
   private async getTokenAccounts() {
+    return this.getTokenAccountsByKeypair(this.publicKey)
+  }
+
+  public async getTokenAccountsByKeypair(walletAddress) {
+    //console.log('publicKey', this.publicKey, 'vs', walletAddress)
     try {
-      const accounts = await this.connection.getParsedTokenAccountsByOwner(this.publicKey, {
+      const accounts = await this.connection.getParsedTokenAccountsByOwner(walletAddress, {
         programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
       });
-      return accounts.value;
+      const haveTokens = accounts.value.filter(account => account.account.data.parsed.info.tokenAmount.uiAmount > 0)
+      return haveTokens
     } catch (error) {
       logger.error('Error fetching token accounts:', error);
       return [];
     }
+  }
+
+  public async getBalanceByAddr(walletAddress) {
+    try {
+      const lamports = await this.connection.getBalance(walletAddress);
+      const sol = lamports / 1e9; // Convert lamports to SOL
+      return sol
+    } catch (error) {
+      logger.error('Error fetching token accounts:', error);
+      return [];
+    }
+  }
+
+  public async getMetadataAddress(mint: PublicKey): Promise<PublicKey> {
+    const [metadataPDA] = await PublicKey.findProgramAddress(
+      [
+        Buffer.from("metadata"),
+        METADATA_PROGRAM_ID.toBuffer(),
+        mint.toBuffer(),
+      ],
+      METADATA_PROGRAM_ID
+    );
+    return metadataPDA;
+  }
+
+  public async getTokenSymbol(mint: PublicKey): Promise<string | null> {
+    const metadataAddress = await this.getMetadataAddress(mint);
+    const accountInfo = await this.connection.getAccountInfo(metadataAddress);
+
+    if (!accountInfo || !accountInfo.data) return null;
+
+    const data = accountInfo.data;
+
+    // Skip the 1-byte key and 32+32+4+len name fields (you can parse these if needed)
+    let offset = 1 + 32 + 32;
+
+    // Name (length-prefixed string)
+    const nameLen = data.readUInt32LE(offset);
+    offset += 4 + nameLen;
+
+    // Symbol (length-prefixed string)
+    const symbolLen = data.readUInt32LE(offset);
+    offset += 4;
+    const symbol = data.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, '');
+    return symbol;
   }
 
   /**
