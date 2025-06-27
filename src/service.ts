@@ -46,7 +46,7 @@ export class SolanaService extends Service {
   private lastUpdate = 0;
   private readonly UPDATE_INTERVAL = 120000; // 2 minutes
   private connection: Connection;
-  private publicKey: KeypairResult | boolean = false;
+  private publicKey: PublicKey | null = null;
   private exchangeRegistry: Record<number, any> = {};
   private subscriptions: Map<string, number> = new Map();
 
