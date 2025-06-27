@@ -1,10 +1,19 @@
 import { type IAgentRuntime, Service, logger } from '@elizaos/core';
-import { Connection, PublicKey } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  VersionedTransaction,
+  VersionedMessage,
+  Transaction,
+  TransactionMessage,
+  TransactionInstruction,
+  LAMPORTS_PER_SOL
+} from '@solana/web3.js';
 import BigNumber from 'bignumber.js';
 import { SOLANA_SERVICE_NAME, SOLANA_WALLET_DATA_CACHE_KEY } from './constants';
 import { getWalletKey, KeypairResult } from './keypairUtils';
 import type { Item, Prices, WalletPortfolio } from './types';
-import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 
 const PROVIDER_CONFIG = {
@@ -23,6 +32,7 @@ const METADATA_PROGRAM_ID = new PublicKey(
   'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s' // Metaplex Token Metadata Program ID
 );
 
+
 /**
  * Service class for interacting with the Solana blockchain and accessing wallet data.
  * @extends Service
@@ -36,9 +46,15 @@ export class SolanaService extends Service {
   private lastUpdate = 0;
   private readonly UPDATE_INTERVAL = 120000; // 2 minutes
   private connection: Connection;
-  private publicKey: PublicKey;
+  private publicKey: KeypairResult | boolean = false;
   private exchangeRegistry: Record<number, any> = {};
   private subscriptions: Map<string, number> = new Map();
+
+  jupiterService: any;
+
+  // always multiple these
+  static readonly LAMPORTS2SOL = 1 / LAMPORTS_PER_SOL;
+  static readonly SOL2LAMPORTS = LAMPORTS_PER_SOL;
 
   /**
    * Constructor for creating an instance of the class.
@@ -51,6 +67,22 @@ export class SolanaService extends Service {
       runtime.getSetting('SOLANA_RPC_URL') || PROVIDER_CONFIG.DEFAULT_RPC
     );
     this.connection = connection;
+
+    const asking = 'Solana service'
+    const serviceType = 'JUPITER_SERVICE'
+    this.jupiterService = this.runtime.getService(serviceType) as any;
+    new Promise(async resolve => {
+      while (!this.jupiterService) {
+        console.log(asking, 'waiting for', serviceType, 'service...');
+        this.jupiterService = this.runtime.getService(serviceType) as any;
+        if (!this.jupiterService) {
+          await new Promise((waitResolve) => setTimeout(waitResolve, 1000));
+        } else {
+          console.log(asking, 'Acquired', serviceType, 'service...');
+        }
+      }
+    })
+
     // Initialize publicKey using getWalletKey
     getWalletKey(runtime, false)
       .then(({ publicKey }) => {
@@ -107,14 +139,14 @@ export class SolanaService extends Service {
         return await response.json();
       } catch (error) {
         logger.error(`Attempt ${i + 1} failed:`, error);
-        lastError = error;
+        lastError = error as Error;
         if (i < PROVIDER_CONFIG.MAX_RETRIES - 1) {
           await new Promise((resolve) => setTimeout(resolve, PROVIDER_CONFIG.RETRY_DELAY * 2 ** i));
         }
       }
     }
 
-    throw lastError;
+    if (lastError) throw lastError;
   }
 
   /**
@@ -162,10 +194,18 @@ export class SolanaService extends Service {
    * @returns {Promise<any[]>} A promise that resolves to an array of token accounts.
    */
   private async getTokenAccounts() {
-    return this.getTokenAccountsByKeypair(this.publicKey)
+    return this.getTokenAccountsByKeypair(this.publicKey as PublicKey)
   }
 
-  public async getTokenAccountsByKeypair(walletAddress) {
+/*
+  for (const t of haveTokens) {
+      const amountRaw = t.account.data.parsed.info.tokenAmount.amount;
+      const ca = new PublicKey(t.account.data.parsed.info.mint);
+      const decimals = t.account.data.parsed.info.tokenAmount.decimals;
+      const balance = Number(amountRaw) / (10 ** decimals);
+      const symbol = await solanaService.getTokenSymbol(ca);
+*/
+  public async getTokenAccountsByKeypair(walletAddress: PublicKey) {
     //console.log('publicKey', this.publicKey, 'vs', walletAddress)
     try {
       const accounts = await this.connection.getParsedTokenAccountsByOwner(walletAddress, {
@@ -179,14 +219,48 @@ export class SolanaService extends Service {
     }
   }
 
-  public async getBalanceByAddr(walletAddress) {
+  // getParsedAccountInfo
+  async getAddressType(address: string) {
+    const pubkey = new PublicKey(address);
+    const accountInfo = await connection.getAccountInfo(pubkey);
+
+    if (!accountInfo) {
+      return 'Account does not exist';
+    }
+
+    //console.log('accountInfo', accountInfo)
+
+    const dataLength = accountInfo.data.length;
+
+    if (dataLength === 0) {
+      return 'Wallet';
+    }
+
+    // SPL Token accounts are always 165 bytes
+    // User's balance of a specified token
+    if (dataLength === 165) {
+      return 'Token Account';
+    }
+
+    // Token mint account
+    if (dataLength === 82) {
+      return 'Token';
+    }
+
+    return `Unknown (Data length: ${dataLength})`;
+  }
+
+  public async getBalanceByAddr(walletAddress: string) {
     try {
+      walletAddress = new PublicKey(walletAddress)
+      console.log('solSrv:getBalanceByAddr - walletAddress', walletAddress)
       const lamports = await this.connection.getBalance(walletAddress);
-      const sol = lamports / 1e9; // Convert lamports to SOL
+      console.log('solSrv:getBalanceByAddr - lamports', lamports)
+      const sol = lamports * SolanaService.LAMPORTS2SOL
       return sol
     } catch (error) {
-      logger.error('Error fetching token accounts:', error);
-      return [];
+      logger.error('solSrv:getBalanceByAddr - Error fetching wallet balance:', error);
+      return -1;
     }
   }
 
@@ -359,6 +433,18 @@ export class SolanaService extends Service {
     return this.connection;
   }
 
+  public isValidSolanaAddress(address, onCurveOnly = false) {
+    try {
+      const pubkey = new PublicKey(address);
+      if (onCurveOnly) {
+        return PublicKey.isOnCurve(pubkey.toBuffer());
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Validates a Solana address.
    * @param {string | undefined} address - The address to validate.
@@ -502,6 +588,156 @@ export class SolanaService extends Service {
       logger.error('Error unsubscribing from account:', error);
       throw error;
     }
+  }
+
+  /**
+   * Calculates the optimal buy amount and slippage based on market conditions
+   * @param {string} inputMint - Input token mint address
+   * @param {string} outputMint - Output token mint address
+   * @param {number} availableAmount - Available amount to trade
+   * @returns {Promise<{ amount: number; slippage: number }>} Optimal amount and slippage
+   */
+  public async calculateOptimalBuyAmount(
+    inputMint: string,
+    outputMint: string,
+    availableAmount: number
+  ): Promise<{ amount: number; slippage: number }> {
+    try {
+      // Get price impact for the trade
+      const priceImpact = await this.jupiterService.getPriceImpact({
+        inputMint,
+        outputMint,
+        amount: availableAmount,
+      });
+
+      // Find optimal slippage based on market conditions
+      const slippage = await this.jupiterService.findBestSlippage({
+        inputMint,
+        outputMint,
+        amount: availableAmount,
+      });
+
+      // FIXME: would be good to know how much volume in the last hour...
+
+      //console.log('calculateOptimalBuyAmount - optimal slippage', slippage)
+
+      // If price impact is too high, reduce the amount
+      let optimalAmount = availableAmount;
+      if (priceImpact > 5) {
+        // 5% price impact threshold
+        optimalAmount = availableAmount * 0.5; // Reduce amount by half
+        console.log('calculateOptimalBuyAmount - too much price impact halving', optimalAmount)
+      }
+
+      return { amount: optimalAmount, slippage };
+    } catch (error) {
+      logger.error('Error calculating optimal buy amount:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Executes buy/sell orders for multiple wallets
+   * @param {Array<{ keypair: any; balance: number }>} wallets - Array of wallet information
+   * @param {any} signal - Trading signal information
+   * @returns {Promise<Array<{ success: boolean; outAmount?: number; fees?: any; swapResponse?: any }>>}
+   */
+  public async executeSwap(wallets: Array<{ keypair: any; amount: number }>, signal: any) {
+    const swapPromises = wallets.map(async (wallet) => {
+      try {
+        console.log('signal.sourceTokenCA', signal.sourceTokenCA, 'signal.targetTokenCA', signal.targetTokenCA, 'wallet.amount', wallet.amount)
+        // Get initial quote to determine input mint and other parameters
+        const initialQuote = await this.jupiterService.getQuote({
+          inputMint: signal.sourceTokenCA,
+          outputMint: signal.targetTokenCA,
+          slippageBps: 200,
+          amount: wallet.amount,
+        });
+        //console.log('initialQuote', initialQuote)
+
+        // outAmount, minOutAmount, priceImpactPct
+        const impliedSlippageBps = ((initialQuote.outAmount - initialQuote.otherAmountThreshold) / initialQuote.outAmount) * 10_000;
+        console.log('impliedSlippageBps', impliedSlippageBps)
+
+        // Calculate optimal buy amount using the input mint from quote
+        const { amount, slippage } = await this.calculateOptimalBuyAmount(
+          initialQuote.inputMint,
+          initialQuote.outputMint,
+          wallet.amount
+        );
+        // amount is in lamports
+        console.log('amount', amount, 'slippage', slippage)
+
+        // is this jupiter specific?
+
+        // Get final quote with optimized amount
+        const quoteResponse = await this.jupiterService.getQuote({
+          inputMint: initialQuote.inputMint,
+          outputMint: initialQuote.outputMint,
+          amount,
+          slippageBps: slippage,
+        });
+        console.log('quoteResponse', quoteResponse)
+        const fees = {
+          lamports: quoteResponse.otherAmountThreshold,
+          sol: quoteResponse.otherAmountThreshold * SolanaService.LAMPORTS2SOL
+        }
+
+        // Execute the swap
+        const swapResponse = await this.jupiterService.executeSwap({
+          quoteResponse,
+          userPublicKey: wallet.keypair.publicKey.toString(),
+          slippageBps: impliedSlippageBps,
+        });
+        //console.log('swapResponse', swapResponse)
+        //console.log('keypair', wallet.keypair)
+
+        const secretKey = bs58.decode(wallet.keypair.privateKey);
+        const keypair = Keypair.fromSecretKey(secretKey);
+        //const signature = await this.executeSwap(keypair, swapResponse)
+        //console.log('keypair', keypair)
+
+        // Deserialize, sign, and send
+        const txBuffer = Buffer.from(swapResponse.swapTransaction, 'base64');
+        const transaction = VersionedTransaction.deserialize(txBuffer);
+        transaction.sign([keypair]);
+
+        // Getting recent blockhash too slow for Solana/Jupiter
+        /*
+        const { blockhash } = await this.connection.getLatestBlockhash('finalized');
+        console.log('blockhash', blockhash)
+        transaction.message.recentBlockhash = blockhash;
+        */
+
+        // Send and confirm
+        const txid = await this.connection.sendRawTransaction(transaction.serialize());
+        //console.log('txid', txid)
+        //await this.connection.confirmTransaction(txid, 'finalized');
+        //console.log('finalized')
+
+        /*
+        // Calculate final amounts including fees
+        const fees = await this.jupiterService.estimateGasFees({
+          inputMint: initialQuote.inputMint,
+          outputMint: initialQuote.outputMint,
+          amount,
+        });
+        */
+
+        return {
+          success: true,
+          outAmount: Number(quoteResponse.outAmount),
+          signature: txid,
+          fees,
+          swapResponse,
+        };
+      } catch (error) {
+        logger.error('Error in buy execution:', error);
+        return { success: false };
+      }
+    });
+
+    return Promise.all(swapPromises);
   }
 
   /**
