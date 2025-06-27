@@ -433,7 +433,7 @@ export class SolanaService extends Service {
     return this.connection;
   }
 
-  public isValidSolanaAddress(address, onCurveOnly = false) {
+  public isValidSolanaAddress(address: string, onCurveOnly = false): boolean {
     try {
       const pubkey = new PublicKey(address);
       if (onCurveOnly) {
