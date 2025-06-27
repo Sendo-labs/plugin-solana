@@ -220,9 +220,12 @@ export class SolanaService extends Service {
   }
 
   // getParsedAccountInfo
+  private static readonly TOKEN_ACCOUNT_DATA_LENGTH = 165;
+  private static readonly TOKEN_MINT_DATA_LENGTH   = 82;
+
   async getAddressType(address: string) {
     const pubkey = new PublicKey(address);
-    const accountInfo = await connection.getAccountInfo(pubkey);
+    const accountInfo = await this.connection.getAccountInfo(pubkey);
 
     if (!accountInfo) {
       return 'Account does not exist';
@@ -238,12 +241,12 @@ export class SolanaService extends Service {
 
     // SPL Token accounts are always 165 bytes
     // User's balance of a specified token
-    if (dataLength === 165) {
+    if (dataLength === SolanaService.TOKEN_ACCOUNT_DATA_LENGTH) {
       return 'Token Account';
     }
 
     // Token mint account
-    if (dataLength === 82) {
+    if (dataLength === SolanaService.TOKEN_MINT_DATA_LENGTH) {
       return 'Token';
     }
 
