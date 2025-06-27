@@ -70,18 +70,20 @@ export class SolanaService extends Service {
 
     const asking = 'Solana service'
     const serviceType = 'JUPITER_SERVICE'
-    this.jupiterService = this.runtime.getService(serviceType) as any;
-    new Promise(async resolve => {
+
+    const getJup = async () => {
+      this.jupiterService = this.runtime.getService(serviceType) as any;
       while (!this.jupiterService) {
-        console.log(asking, 'waiting for', serviceType, 'service...');
+        runtime.logger.debug(asking, 'waiting for', serviceType, 'service...');
         this.jupiterService = this.runtime.getService(serviceType) as any;
         if (!this.jupiterService) {
           await new Promise((waitResolve) => setTimeout(waitResolve, 1000));
         } else {
-          console.log(asking, 'Acquired', serviceType, 'service...');
+          runtime.logger.debug(asking, 'Acquired', serviceType, 'service...');
         }
       }
-    })
+    }
+    getJup() // no wait
 
     // Initialize publicKey using getWalletKey
     getWalletKey(runtime, false)
@@ -253,16 +255,13 @@ export class SolanaService extends Service {
     return `Unknown (Data length: ${dataLength})`;
   }
 
-  public async getBalanceByAddr(walletAddress: string) {
+  public async getBalanceByAddr(walletAddressStr: string) {
     try {
-      walletAddress = new PublicKey(walletAddress)
-      console.log('solSrv:getBalanceByAddr - walletAddress', walletAddress)
-      const lamports = await this.connection.getBalance(walletAddress);
-      console.log('solSrv:getBalanceByAddr - lamports', lamports)
-      const sol = lamports * SolanaService.LAMPORTS2SOL
-      return sol
+      const publicKey = new PublicKey(walletAddressStr)
+      const lamports = await this.connection.getBalance(publicKey);
+      return lamports * SolanaService.LAMPORTS2SOL
     } catch (error) {
-      logger.error('solSrv:getBalanceByAddr - Error fetching wallet balance:', error);
+      this.runtime.logger.error('solSrv:getBalanceByAddr - Error fetching wallet balance:', error);
       return -1;
     }
   }
