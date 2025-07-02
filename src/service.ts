@@ -435,6 +435,86 @@ export class SolanaService extends Service {
     return this.connection;
   }
 
+  /**
+   * Detect Solana public keys (Base58) in a string
+   * @param input arbitrary text
+   * @param checkCurve whether to verify the key is on the Ed25519 curve via @solana/web3.js
+   * @returns list of detected public key strings
+   */
+  public detectPubkeysFromString(input: string, checkCurve = false): Array<string> {
+    const results = new Set<string>();
+    const regex = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(input)) !== null) {
+      const s = match[0];
+      try {
+        const buf = bs58.decode(s);
+        if (buf.length === 32) {
+          if (checkCurve) {
+            if (PublicKey.isOnCurve(buf)) {
+              results.add(s);
+            }
+          } else {
+            results.add(s);
+          }
+        }
+      } catch {
+        // Not valid Base58
+      }
+    }
+
+    return Array.from(results);
+  }
+
+  /**
+   * Detect Solana private keys in a string.
+   *
+   * Supports:
+   * - Base58 (≈88 chars, representing 64 bytes → 512 bits)
+   * - Hexadecimal (128 hex chars → 64 bytes)
+   *
+   * Returns an array of objects with the original match and decoded bytes.
+   */
+  public detectPrivateKeysFromString(input: string): Array<{
+    format: 'base58' | 'hex',
+    match: string,
+    bytes: Uint8Array
+  }> {
+    const results = [];
+
+    // Base58 regex (no 0,O,I,l)
+    const base58Regex = /\b[1-9A-HJ-NP-Za-km-z]{86,90}\b/g;
+    // Hex regex: 128 hex chars
+    const hexRegex = /\b[a-fA-F0-9]{128}\b/g;
+
+    let m: RegExpExecArray | null;
+
+    // Check Base58 matches
+    while ((m = base58Regex.exec(input)) !== null) {
+      const s = m[0];
+      try {
+        const buf = bs58.decode(s);
+        if (buf.length === 64) {
+          results.push({ format: 'base58', match: s, bytes: Uint8Array.from(buf) });
+        }
+      } catch {
+        // invalid base58 — ignore
+      }
+    }
+
+    // Check hex matches
+    while ((m = hexRegex.exec(input)) !== null) {
+      const s = m[0];
+      const buf = Buffer.from(s, 'hex');
+      if (buf.length === 64) {
+        results.push({ format: 'hex', match: s, bytes: Uint8Array.from(buf) });
+      }
+    }
+
+    return results;
+  }
+
   public isValidSolanaAddress(address: string, onCurveOnly = false): boolean {
     try {
       const pubkey = new PublicKey(address);
@@ -689,7 +769,7 @@ export class SolanaService extends Service {
         const swapResponse = await this.jupiterService.executeSwap({
           quoteResponse,
           userPublicKey: wallet.keypair.publicKey.toString(),
-          slippageBps: impliedSlippageBps,
+          slippageBps: parseInt(impliedSlippageBps),
         });
         //console.log('swapResponse', swapResponse)
         //console.log('keypair', wallet.keypair)
