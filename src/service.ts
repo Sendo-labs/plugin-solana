@@ -17,6 +17,7 @@ import { SOLANA_SERVICE_NAME, SOLANA_WALLET_DATA_CACHE_KEY } from './constants';
 import { getWalletKey, KeypairResult } from './keypairUtils';
 import type { Item, Prices, WalletPortfolio } from './types';
 import bs58 from 'bs58';
+import nacl from "tweetnacl";
 
 const PROVIDER_CONFIG = {
   BIRDEYE_API: 'https://public-api.birdeye.so',
@@ -34,6 +35,26 @@ const METADATA_PROGRAM_ID = new PublicKey(
   'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s' // Metaplex Token Metadata Program ID
 );
 
+// CA: { }
+let tokenInfoCache = {}
+
+// hack these in here
+async function getCacheExp(runtime, key) {
+  const wrapper = runtime.getCache<WalletPortfolio>(key);
+  // if exp is in the past
+  if (wrapper.exp < Date.now()) {
+    // no data
+    return false
+  }
+  return wrapper.data
+}
+async function setCacheExp(runtime, key, val, ttlInSecs) {
+  const exp = Date.now() + ttlInSecs * 1_000
+  return runtime.setCache<WalletPortfolio>(key, {
+    exp,
+    data: val,
+  });
+}
 
 /**
  * Service class for interacting with the Solana blockchain and accessing wallet data.
@@ -57,6 +78,13 @@ export class SolanaService extends Service {
   // always multiple these
   static readonly LAMPORTS2SOL = 1 / LAMPORTS_PER_SOL;
   static readonly SOL2LAMPORTS = LAMPORTS_PER_SOL;
+
+  // Token decimals cache
+  private decimalsCache = new Map<string, number>([
+    ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 6], // USDC
+    ['Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', 6], // USDT
+    ['So11111111111111111111111111111111111111112', 9], // SOL
+  ]);
 
   /**
    * Constructor for creating an instance of the class.
@@ -99,8 +127,18 @@ export class SolanaService extends Service {
         logger.error('Error initializing public key:', error);
       });
     this.subscriptions = new Map();
+  }
 
-    this.routeCache = {}
+  /**
+   * Registers a swap provider to execute swaps
+   * @param {any} provider - The provider to register
+   * @returns {Promise<number>} The ID assigned to the registered provider
+   */
+  async registerExchange(provider: any) {
+    const id = Object.values(this.exchangeRegistry).length + 1;
+    logger.log('Registered', provider.name, 'as Solana provider #' + id);
+    this.exchangeRegistry[id] = provider;
+    return id;
   }
 
   /**
@@ -205,8 +243,16 @@ export class SolanaService extends Service {
 
  public async getDecimal(mintPublicKey: PublicKey) {
    try {
+      const key = mintPublicKey.toString()
+      if (this.decimalsCache.has(key)) {
+        console.log('getDecimal - cache')
+        return this.decimalsCache.get(key)!;
+      }
       //const mintPublicKey = new PublicKey(mintAddress);
+      console.log('getDecimal - getMint')
       const mintInfo = await getMint(this.connection, mintPublicKey);
+      //console.log('getDecimal - mintInfo', mintInfo)
+      this.decimalsCache.set(key, mintInfo.decimals);
       return mintInfo;
     } catch (error) {
       console.error('Failed to fetch token decimals:', error);
@@ -215,6 +261,7 @@ export class SolanaService extends Service {
   }
   public async getTokenSymbol(mint: PublicKey): Promise<string | null> {
     const metadataAddress = await this.getMetadataAddress(mint);
+    console.log('getTokenSymbol')
     const accountInfo = await this.connection.getAccountInfo(metadataAddress);
 
     if (!accountInfo || !accountInfo.data) return null;
@@ -244,8 +291,12 @@ export class SolanaService extends Service {
       const symbol = await solanaService.getTokenSymbol(ca);
 */
   public async getTokenAccountsByKeypair(walletAddress: PublicKey) {
+    //console.log('getTokenAccountsByKeypair', walletAddress.toString())
     //console.log('publicKey', this.publicKey, 'vs', walletAddress)
+    console.trace('whos checking jj')
     try {
+      // FIXME: 1 second cache...
+      console.log('getTokenAccountsByKeypair - getParsedTokenAccountsByOwner', walletAddress.toString())
       const accounts = await this.connection.getParsedTokenAccountsByOwner(walletAddress, {
         programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
       });
@@ -258,50 +309,37 @@ export class SolanaService extends Service {
   }
 
   public async parseTokenAccounts(heldTokens) {
-    const out = {}
+    // decimalsCache means we don't need all I think
+    // stil need them for symbol
+    const mintKeys = heldTokens.map(t => new PublicKey(t.account.data.parsed.info.mint));
+    const metadataAddresses = await Promise.all(mintKeys.map(mk => this.getMetadataAddress(mk)))
+    console.log('parseTokenAccounts - getMultipleAccountsInfo')
+    const accountInfos = await this.connection.getMultipleAccountsInfo(metadataAddresses);
+    //console.log('accountInfos', accountInfos) // works
 
-    // we need ease multiple getTokenSymbol calls
-    /*
-    const metadataAddresses = await Promise.all(heldTokens.map(t => this.getMetadataAddress(new PublicKey(t.account.data.parsed.info.mint))))
-    const infos = await this.connection.getMultipleAccountsInfo(metadataAddresses);
-    console.log('infos', infos) // works
-{
-    lamports: 5115600,
-    data: <Buffer 04 06 c5 c1 ce 63 8d 25 67 d2 64 68 b0 5e b9 51 d1 a2 8d cc 6e 12 34 82 b5 c6 75 14 97 70 e6 2b f2 94 2b 01 9b c1 0e 09 5e ee ac d8 c6 72 0f 09 6c b9 ... 557 more bytes>,
-    owner: PublicKey {
-      _bn: <BN: b7065b1e3d17c45389d527f6b04c3cd58b86c731aa0fdb549b6d1bc03f82946>,
-      equals: [Function: equals],
-      toBase58: [Function: toBase58],
-      toJSON: [Function: toJSON],
-      toBytes: [Function: toBytes],
-      toBuffer: [Function: toBuffer],
-      toString: [Function: toString],
-      encode: [Function: encode],
-    },
-    executable: false,
-    rentEpoch: 18446744073709552000,
-    space: 607,
-  },
-    */
+    const results = heldTokens.map((token, i) => {
+      const metadataInfo = accountInfos[i];      // raw AccountInfo | null
+      const mintKey      = mintKeys[i];
 
-    const results = await Promise.all(heldTokens.map(async t => {
-      const mintKey = new PublicKey(t.account.data.parsed.info.mint);
-      const metaAddr = await this.getMetadataAddress(mintKey);
-      const accountInfo = await this.connection.getAccountInfo(metaAddr);
-
+      // ----- Metaplex metadata deserialisation -----
       let symbol: string | null = null;
-      if (accountInfo?.data) {
-        const data = accountInfo.data;
-        let offset = 1 + 32 + 32;
-        const nameLen = data.readUInt32LE(offset);
-        offset += 4 + nameLen;
-        const symbolLen = data.readUInt32LE(offset);
-        offset += 4;
-        symbol = data.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, '');
+      if (metadataInfo?.data?.length) {
+        const data = metadataInfo.data;
+
+        let offset = 1 + 32 + 32;        // key + updateAuthority + mint
+        const nameLen   = data.readUInt32LE(offset);  offset += 4 + nameLen;
+        const symbolLen = data.readUInt32LE(offset);  offset += 4;
+
+        symbol = data
+          .slice(offset, offset + symbolLen)
+          .toString("utf8")
+          .replace(/\0/g, "");           // trim right-padding
       }
 
-      const { amount: amountRaw, decimals } = t.account.data.parsed.info.tokenAmount;
-      const balanceUi = Number(amountRaw) / 10 ** decimals;
+      // ----- Token-account figures (already parsed) -----
+      const { amount: raw, decimals } = token.account.data.parsed.info.tokenAmount;
+      this.decimalsCache.set(token.account.data.parsed.info.mint, decimals);
+      const balanceUi = Number(raw) / 10 ** decimals;
 
       return {
         mint: mintKey.toBase58(),
@@ -309,35 +347,17 @@ export class SolanaService extends Service {
         decimals,
         balanceUi,
       };
-    }));
+    });
+    //console.log('results', results)
 
     // then convert to object
-    const out2 = Object.fromEntries(results.map(r => [r.mint, {
+    const out = Object.fromEntries(results.map(r => [r.mint, {
       symbol: r.symbol,
       decimals: r.decimals,
       balanceUi: r.balanceUi,
     }]));
-    return out2
-    /*
-    console.log('out2', out2)
-
-    // probably better as parallelized map
-    for (const t of heldTokens) {
-      const ca = t.account.data.parsed.info.mint
-      const mintKey = new PublicKey(ca);
-      const symbol = await this.getTokenSymbol(mintKey)
-      console.log('solsrv:parseTokenAccounts symbol', symbol)
-      const amountRaw = t.account.data.parsed.info.tokenAmount.amount;
-      const decimals = t.account.data.parsed.info.tokenAmount.decimals;
-      const balance = Number(amountRaw) / (10 ** decimals);
-      out[ca] = {
-        symbol,
-        decimals,
-        balanceUi: balance, // how many tokens we have
-      }
-    }
+    //console.log('out', out)
     return out
-    */
   }
 
   // we might want USD price and other info...
@@ -390,6 +410,7 @@ export class SolanaService extends Service {
     let dataLength = -1
     try {
       const pubkey = new PublicKey(address);
+      console.log('getAddressType - getAccountInfo')
       const accountInfo = await this.connection.getAccountInfo(pubkey);
 
       if (!accountInfo) {
@@ -424,10 +445,32 @@ export class SolanaService extends Service {
   public async getBalanceByAddr(walletAddressStr: string) {
     try {
       const publicKey = new PublicKey(walletAddressStr)
+      console.log('getBalanceByAddr - getBalance')
       const lamports = await this.connection.getBalance(publicKey);
       return lamports * SolanaService.LAMPORTS2SOL
     } catch (error) {
       this.runtime.logger.error('solSrv:getBalanceByAddr - Error fetching wallet balance:', error);
+      return -1;
+    }
+  }
+
+  public async getBalancesByAddrs(walletAddressArr: string[]) {
+    try {
+      const publicKeyObjs = walletAddressArr.map(k => new PublicKey(k));
+      console.log('getBalancesByAddrs - getMultipleAccountsInfo')
+      const accounts = await this.connection.getMultipleAccountsInfo(publicKeyObjs);
+      //console.log('getBalancesByAddrs - accounts', accounts)
+      const out = {}
+      for(const i in accounts) {
+        const a = accounts[i]
+        // lamports, data, owner, executable, rentEpoch, space
+        //console.log('a', a)
+        const pk = walletAddressArr[i]
+        out[pk] = a?.lamports * SolanaService.LAMPORTS2SOL
+      }
+      return out
+    } catch (error) {
+      this.runtime.logger.error('solSrv:getBalancesByAddrs - Error fetching wallet balances:', error);
       return -1;
     }
   }
@@ -514,6 +557,7 @@ export class SolanaService extends Service {
 
       // Fallback to basic token account info
       const accounts = await this.getTokenAccounts();
+      this.decimalsCache.set(acc.account.data.parsed.info.mint, acc.account.data.parsed.info.tokenAmount.decimals);
       const items: Item[] = accounts.map((acc) => ({
         name: 'Unknown',
         address: acc.account.data.parsed.info.mint,
@@ -721,16 +765,12 @@ export class SolanaService extends Service {
     }
   }
 
-  /**
-   * Registers a provider with the service.
-   * @param {any} provider - The provider to register
-   * @returns {Promise<number>} The ID assigned to the registered provider
-   */
-  async registerExchange(provider: any) {
-    const id = Object.values(this.exchangeRegistry).length + 1;
-    logger.log('Registered', provider.name, 'as Solana provider #' + id);
-    this.exchangeRegistry[id] = provider;
-    return id;
+  verifySolanaSignature({ message, signatureBase64, publicKeyBase58 }) {
+    const signature = Buffer.from(signatureBase64, "base64");
+    const messageUint8 = new TextEncoder().encode(message);
+    const publicKeyBytes = bs58.decode(publicKeyBase58);
+
+    return nacl.sign.detached.verify(messageUint8, signature, publicKeyBytes);
   }
 
   /**
@@ -738,6 +778,7 @@ export class SolanaService extends Service {
    * @param {string} accountAddress - The account address to subscribe to
    * @returns {Promise<number>} Subscription ID
    */
+  // needs to take a handler...
   public async subscribeToAccount(accountAddress: string): Promise<number> {
     try {
       if (!this.validateAddress(accountAddress)) {
@@ -749,6 +790,7 @@ export class SolanaService extends Service {
         return this.subscriptions.get(accountAddress)!;
       }
 
+      /*
       // Create WebSocket connection if needed
       const ws = this.connection.connection._rpcWebSocket;
 
@@ -778,6 +820,13 @@ export class SolanaService extends Service {
           logger.error('Error handling account notification:', error);
         }
       });
+      */
+      const accountPubkeyObj = new PublicKey(accountAddress);
+      const subscriptionId = this.connection.onAccountChange(accountPubkeyObj, (accountInfo, context) => {
+        console.log('sub', accountAddress, 'Account updated:', accountInfo);
+        console.log('sub', accountAddress, 'Slot:', context.slot); // like block
+      }, 'finalized')
+
 
       this.subscriptions.set(accountAddress, subscriptionId);
       logger.log(`Subscribed to account ${accountAddress} with ID ${subscriptionId}`);
@@ -955,11 +1004,6 @@ export class SolanaService extends Service {
 
         // is this reusable if there's a bunch of wallets with the same amount
 
-        const key = signal.sourceTokenCA + '_' + signal.targetTokenCA
-        if (this.routeCache[key]) {
-          console.log('we have a route for', key, this.routeCache[key].routePlan)
-        }
-
         // Get initial quote to determine input mint and other parameters
         const initialQuote = await this.jupiterService.getQuote({
           inputMint: signal.sourceTokenCA,
@@ -967,9 +1011,8 @@ export class SolanaService extends Service {
           slippageBps: 200,
           amount: intAmount, // in atomic units of the token
         });
+        // no decimals
         console.log('initialQuote', initialQuote)
-
-        this.routeCache[key] = initialQuote
 
         const availableLamports = bal * 1e9
         console.log('availableLamports', availableLamports)
@@ -1164,7 +1207,12 @@ export class SolanaService extends Service {
         if (txDetails.meta.preTokenBalances && txDetails.meta.postTokenBalances) {
           const inBal = txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey && tb.mint === signal.targetTokenCA)
           const outBal = txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey && tb.mint === signal.targetTokenCA)
-          console.log('inBal', inBal?.uiTokenAmount, 'outBal', outBal?.uiTokenAmount)
+          console.log('inBal', inBal?.uiTokenAmount?.uiAmount, 'outBal', outBal?.uiTokenAmount?.uiAmount)
+
+          if (outBal?.uiTokenAmount.decimals) {
+            this.decimalsCache.set(signal.targetTokenCA, outBal.uiTokenAmount.decimals)
+          }
+
           if (inBal && outBal) {
             const lamDiff = outBal.uiTokenAmount.uiAmount - inBal.uiTokenAmount.uiAmount
             outAmount = Number(outBal.uiTokenAmount.amount) - Number(inBal.uiTokenAmount.amount)
@@ -1179,7 +1227,7 @@ export class SolanaService extends Service {
         }
 
         const fee = txDetails.meta.fee;
-        console.log(`Transaction fee: ${fee} lamports`);
+        console.log(`Transaction fee: ${fee.toLocaleString()} lamports`);
         const fees = {
           /*
           quote: {
@@ -1203,6 +1251,7 @@ export class SolanaService extends Service {
         swapRespones[pubKey] = {
           success: true,
           outAmount,
+          outDecimal: await this.getDecimal(signal.targetTokenCA),
           signature: txid,
           fees,
           swapResponse,
