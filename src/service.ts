@@ -39,8 +39,8 @@ const METADATA_PROGRAM_ID = new PublicKey(
 let tokenInfoCache = {}
 
 // hack these in here
-async function getCacheExp(runtime, key) {
-  const wrapper = runtime.getCache<WalletPortfolio>(key);
+async function getCacheExp(runtime: IAgentRuntime, key: string) {
+  const wrapper = await runtime.getCache<any>(key);
   // if exp is in the past
   if (wrapper.exp < Date.now()) {
     // no data
@@ -48,9 +48,9 @@ async function getCacheExp(runtime, key) {
   }
   return wrapper.data
 }
-async function setCacheExp(runtime, key, val, ttlInSecs) {
+async function setCacheExp(runtime: IAgentRuntime, key: string, val: any, ttlInSecs: number) {
   const exp = Date.now() + ttlInSecs * 1_000
-  return runtime.setCache<WalletPortfolio>(key, {
+  return runtime.setCache<any>(key, {
     exp,
     data: val,
   });
@@ -241,7 +241,7 @@ export class SolanaService extends Service {
     return this.getTokenAccountsByKeypair(this.publicKey as PublicKey)
   }
 
- public async getDecimal(mintPublicKey: PublicKey) {
+ public async getDecimal(mintPublicKey: PublicKey): Promise<number> {
    try {
       const key = mintPublicKey.toString()
       if (this.decimalsCache.has(key)) {
@@ -253,7 +253,7 @@ export class SolanaService extends Service {
       const mintInfo = await getMint(this.connection, mintPublicKey);
       //console.log('getDecimal - mintInfo', mintInfo)
       this.decimalsCache.set(key, mintInfo.decimals);
-      return mintInfo;
+      return mintInfo.decimals;
     } catch (error) {
       console.error('Failed to fetch token decimals:', error);
       throw error;
@@ -293,7 +293,7 @@ export class SolanaService extends Service {
   public async getTokenAccountsByKeypair(walletAddress: PublicKey) {
     //console.log('getTokenAccountsByKeypair', walletAddress.toString())
     //console.log('publicKey', this.publicKey, 'vs', walletAddress)
-    console.trace('whos checking jj')
+    //console.trace('whos checking jj')
     try {
       // FIXME: 1 second cache...
       console.log('getTokenAccountsByKeypair - getParsedTokenAccountsByOwner', walletAddress.toString())
@@ -311,8 +311,8 @@ export class SolanaService extends Service {
   public async parseTokenAccounts(heldTokens) {
     // decimalsCache means we don't need all I think
     // stil need them for symbol
-    const mintKeys = heldTokens.map(t => new PublicKey(t.account.data.parsed.info.mint));
-    const metadataAddresses = await Promise.all(mintKeys.map(mk => this.getMetadataAddress(mk)))
+    const mintKeys: PublicKey[] = heldTokens.map(t => new PublicKey(t.account.data.parsed.info.mint));
+    const metadataAddresses: PublicKey[] = await Promise.all(mintKeys.map(mk => this.getMetadataAddress(mk)))
     console.log('parseTokenAccounts - getMultipleAccountsInfo')
     const accountInfos = await this.connection.getMultipleAccountsInfo(metadataAddresses);
     //console.log('accountInfos', accountInfos) // works
@@ -361,12 +361,12 @@ export class SolanaService extends Service {
   }
 
   // we might want USD price and other info...
-  async walletAddressToHumanString(pubKey) {
+  async walletAddressToHumanString(pubKey: string): Promise<string> {
     let balanceStr = ''
     // get wallet contents
     const pubKeyObj = new PublicKey(pubKey)
     const [solBal, heldTokens] = await Promise.all([
-      this.getBalanceByAddr(pubKeyObj),
+      this.getBalanceByAddr(pubKey),
       this.getTokenAccountsByKeypair(pubKeyObj),
     ]);
     balanceStr += 'Wallet Address: ' + pubKey + '\n'
@@ -381,12 +381,12 @@ export class SolanaService extends Service {
     return balanceStr
   }
 
-  async walletAddressToLLMString(pubKey) {
+  async walletAddressToLLMString(pubKey: string): Promise<string> {
     let balanceStr = ''
     // get wallet contents
     const pubKeyObj = new PublicKey(pubKey)
     const [solBal, heldTokens] = await Promise.all([
-      this.getBalanceByAddr(pubKeyObj),
+      this.getBalanceByAddr(pubKey),
       this.getTokenAccountsByKeypair(pubKeyObj),
     ]);
     balanceStr += 'Wallet Address: ' + pubKey + '\n'
@@ -406,7 +406,7 @@ export class SolanaService extends Service {
   private static readonly TOKEN_ACCOUNT_DATA_LENGTH = 165;
   private static readonly TOKEN_MINT_DATA_LENGTH   = 82;
 
-  async getAddressType(address: string) {
+  async getAddressType(address: string): Promise<string> {
     let dataLength = -1
     try {
       const pubkey = new PublicKey(address);
@@ -442,7 +442,7 @@ export class SolanaService extends Service {
     return `Unknown (Data length: ${dataLength})`;
   }
 
-  public async getBalanceByAddr(walletAddressStr: string) {
+  public async getBalanceByAddr(walletAddressStr: string): Promise<number> {
     try {
       const publicKey = new PublicKey(walletAddressStr)
       console.log('getBalanceByAddr - getBalance')
@@ -557,7 +557,9 @@ export class SolanaService extends Service {
 
       // Fallback to basic token account info
       const accounts = await this.getTokenAccounts();
-      this.decimalsCache.set(acc.account.data.parsed.info.mint, acc.account.data.parsed.info.tokenAmount.decimals);
+      accounts.forEach((acc) => {
+        this.decimalsCache.set(acc.account.data.parsed.info.mint, acc.account.data.parsed.info.tokenAmount.decimals);
+      });
       const items: Item[] = accounts.map((acc) => ({
         name: 'Unknown',
         address: acc.account.data.parsed.info.mint,
@@ -658,6 +660,11 @@ export class SolanaService extends Service {
   /**
    * Detect Solana private keys in a string.
    *
+   * ⚠️ SECURITY WARNING: This method handles sensitive private key material.
+   * - Never log or expose the returned bytes
+   * - Clear sensitive data from memory after use
+   * - Consider if this method should be public
+   *
    * Supports:
    * - Base58 (≈88 chars, representing 64 bytes → 512 bits)
    * - Hexadecimal (128 hex chars → 64 bytes)
@@ -669,7 +676,11 @@ export class SolanaService extends Service {
     match: string,
     bytes: Uint8Array
   }> {
-    const results = [];
+    const results: Array<{
+      format: 'base58' | 'hex';
+      match: string;
+      bytes: Uint8Array;
+    }> = [];
 
     // Base58 regex (no 0,O,I,l)
     const base58Regex = /\b[1-9A-HJ-NP-Za-km-z]{86,90}\b/g;
@@ -765,7 +776,11 @@ export class SolanaService extends Service {
     }
   }
 
-  verifySolanaSignature({ message, signatureBase64, publicKeyBase58 }) {
+  verifySolanaSignature({
+    message, signatureBase64, publicKeyBase58
+  }: {
+    message: string; signatureBase64: string; publicKeyBase58: string;
+  }): boolean {
     const signature = Buffer.from(signatureBase64, "base64");
     const messageUint8 = new TextEncoder().encode(message);
     const publicKeyBytes = bs58.decode(publicKeyBase58);
@@ -913,7 +928,7 @@ export class SolanaService extends Service {
     }
   }
 
-  public async calculateOptimalBuyAmount2(quote, availableAmount: number) {
+  public async calculateOptimalBuyAmount2(quote: any, availableAmount: number): Promise<{ amount: number; slippage: number }> {
     try {
       // Get price impact for the trade
 
@@ -951,7 +966,7 @@ export class SolanaService extends Service {
    * @param {any} signal - Trading signal information
    * @returns {Promise<Array<{ success: boolean; outAmount?: number; fees?: any; swapResponse?: any }>>}
    */
-  public async executeSwap(wallets: Array<{ keypair: any; amount: number }>, signal: any) {
+  public async executeSwap(wallets: Array<{ keypair: any; amount: number | string }>, signal: any) {
     // do it in serial to avoid hitting rate limits
     const swapRespones = {}
     for(const wallet of wallets) {
@@ -959,7 +974,7 @@ export class SolanaService extends Service {
       try {
 
         // validate amount
-        const intAmount = parseInt(wallet.amount)
+        const intAmount: number = parseInt(wallet.amount)
         if (isNaN(intAmount) || intAmount <= 0) {
           console.warn('solana::executeSwap - Amount in', wallet.amount, 'become', intAmount)
           swapRespones[pubKey] = {
@@ -1134,12 +1149,13 @@ export class SolanaService extends Service {
         */
 
         // Send and confirm
-        let txid = false
+        let txid = ''
         try {
           txid = await this.connection.sendRawTransaction(transaction.serialize());
         } catch (err) {
           if (err instanceof SendTransactionError) {
-            const logs = err.logs || await err.getLogs();
+            // getLogs expects param?
+            const logs = err.logs || await err.getLogs(this.connection);
 
             if (logs) {
               if (logs.some(l => l.includes('custom program error: 0x1771'))) {
