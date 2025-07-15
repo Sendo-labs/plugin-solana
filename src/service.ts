@@ -460,13 +460,17 @@ export class SolanaService extends Service {
       console.log('getBalancesByAddrs - getMultipleAccountsInfo')
       const accounts = await this.connection.getMultipleAccountsInfo(publicKeyObjs);
       //console.log('getBalancesByAddrs - accounts', accounts)
-      const out = {}
+      const out: Record<string, number> = {}
       for(const i in accounts) {
         const a = accounts[i]
         // lamports, data, owner, executable, rentEpoch, space
         //console.log('a', a)
         const pk = walletAddressArr[i]
-        out[pk] = a?.lamports * SolanaService.LAMPORTS2SOL
+        if (a?.lamports) {
+          out[pk] = a.lamports * SolanaService.LAMPORTS2SOL
+        } else {
+          out[pk] = -1
+        }
       }
       return out
     } catch (error) {
@@ -966,7 +970,7 @@ export class SolanaService extends Service {
    * @param {any} signal - Trading signal information
    * @returns {Promise<Array<{ success: boolean; outAmount?: number; fees?: any; swapResponse?: any }>>}
    */
-  public async executeSwap(wallets: Array<{ keypair: any; amount: number | string }>, signal: any) {
+  public async executeSwap(wallets: Array<{ keypair: any; amount: number }>, signal: any) {
     // do it in serial to avoid hitting rate limits
     const swapRespones = {}
     for(const wallet of wallets) {
