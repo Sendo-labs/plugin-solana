@@ -972,7 +972,7 @@ export class SolanaService extends Service {
    */
   public async executeSwap(wallets: Array<{ keypair: any; amount: number }>, signal: any) {
     // do it in serial to avoid hitting rate limits
-    const swapRespones = {}
+    const swapResponses = {}
     for(const wallet of wallets) {
       const pubKey = wallet.keypair.publicKey.toString()
       try {
@@ -981,7 +981,7 @@ export class SolanaService extends Service {
         const intAmount: number = parseInt(wallet.amount)
         if (isNaN(intAmount) || intAmount <= 0) {
           console.warn('solana::executeSwap - Amount in', wallet.amount, 'become', intAmount)
-          swapRespones[pubKey] = {
+          swapResponses[pubKey] = {
             success: false,
             error: 'bad amount'
           };
@@ -1001,7 +1001,7 @@ export class SolanaService extends Service {
         // avoid wasting jupiter quote rate limit
         if (baseLamports > ourLamports) {
           console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low to swap')
-          swapRespones[pubKey] = {
+          swapResponses[pubKey] = {
             success: false,
             error: 'not enough SOL'
           };
@@ -1011,7 +1011,7 @@ export class SolanaService extends Service {
         /*
         if (bal < 0.001) {
           console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low to do anything', bal)
-          swapRespones[pubKey] = {
+          swapResponses[pubKey] = {
             success: false,
             error: 'not enough SOL'
           };
@@ -1039,7 +1039,7 @@ export class SolanaService extends Service {
           // we can't afford as is
           console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low, has', availableLamports, 'needs', initialQuote.totalLamportsNeeded)
           // lets make sure
-          swapRespones[pubKey] = {
+          swapResponses[pubKey] = {
             success: false,
             error: 'not enough SOL'
           };
@@ -1268,7 +1268,7 @@ export class SolanaService extends Service {
         });
         */
 
-        swapRespones[pubKey] = {
+        swapResponses[pubKey] = {
           success: true,
           outAmount,
           outDecimal: await this.getDecimal(signal.targetTokenCA),
@@ -1278,11 +1278,11 @@ export class SolanaService extends Service {
         };
       } catch (error) {
         logger.error('Error in swap execution:', error);
-        swapRespones[pubKey] = { success: false };
+        swapResponses[pubKey] = { success: false };
       }
     }
 
-    return swapRespones;
+    return swapResponses;
   }
 
   /**
