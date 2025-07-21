@@ -816,7 +816,7 @@ export class SolanaService extends Service {
   public async getTokenAccountsByKeypair(walletAddress: PublicKey, options = {}) {
     //console.log('getTokenAccountsByKeypair', walletAddress.toString())
     //console.log('publicKey', this.publicKey, 'vs', walletAddress)
-    const key = 'solana_' + walletAddress + '_tokens'
+    const key = 'solana_' + walletAddress.toString() + '_tokens'
     //console.trace('whos checking jj')
     try {
       const now = Date.now()
@@ -1174,8 +1174,8 @@ export class SolanaService extends Service {
         }
 
         // balance check to protect quote rate limit
-        const balances = await this.getBalancesByAddrs([wallet.keypair.publicKey])
-        const bal = balances[wallet.keypair.publicKey]
+        const balances = await this.getBalancesByAddrs([pubKey])
+        const bal = balances[pubKey]
         //console.log('executeSwap -', wallet.keypair.publicKey, 'bal', bal)
 
         // 0.000748928
