@@ -11,7 +11,7 @@ import {
   SendTransactionError,
   LAMPORTS_PER_SOL
 } from '@solana/web3.js';
-import { MintLayout, getMint, TOKEN_PROGRAM_ID, unpackAccount, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { MintLayout, getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, unpackAccount, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import BigNumber from 'bignumber.js';
 import { SOLANA_SERVICE_NAME, SOLANA_WALLET_DATA_CACHE_KEY } from './constants';
 import { getWalletKey, KeypairResult } from './keypairUtils';
@@ -478,15 +478,36 @@ export class SolanaService extends Service {
         console.log('getDecimal - HIT', key)
         return this.decimalsCache.get(key)!;
       }
-      //const mintPublicKey = new PublicKey(mintAddress);
-      console.log('getDecimal - MISS getMint', key)
-      const mintInfo = await getMint(this.connection, mintPublicKey);
-      //console.log('getDecimal - mintInfo', mintInfo)
-      this.decimalsCache.set(key, mintInfo.decimals);
-      return mintInfo.decimals;
+
+      console.log('getDecimal - MISS getParsedAccountInfo', key)
+      const acc = await this.connection.getParsedAccountInfo(mintPublicKey);
+      const owner = acc.value?.owner.toString();
+
+      if (owner === TOKEN_PROGRAM_ID.toString()) {
+        //const mintPublicKey = new PublicKey(mintAddress);
+        console.log('getDecimal - MISS getMint', key)
+        const mintInfo = await getMint(this.connection, mintPublicKey);
+        //console.log('getDecimal - mintInfo', mintInfo)
+        this.decimalsCache.set(key, mintInfo.decimals);
+        return mintInfo.decimals;
+      } else if (owner === TOKEN_2022_PROGRAM_ID.toString()) {
+        const mintInfo = await getMint(
+          this.connection,
+          mintPublicKey,
+          undefined,                // optional commitment
+          TOKEN_2022_PROGRAM_ID     // specify the extensions token program
+        );
+        console.log('getDecimal - mintInfo2022', mintInfo)
+        this.decimalsCache.set(key, mintInfo.decimals);
+        return mintInfo.decimals;
+      }
+      console.error('Unknown owner type', owner, acc)
+      return -1
     } catch (error) {
+      // this will fail on a token2022 token
       console.error('Failed to fetch token decimals:', error);
-      throw error;
+      //throw error;
+      return -1;
     }
   }
 
@@ -893,7 +914,15 @@ export class SolanaService extends Service {
       }
       return out
     } catch (error) {
-      this.runtime.logger.error('solSrv:getBalancesByAddrs - Error fetching wallet balances:', error);
+      const msg = error.message || '';
+      if (msg.includes('429')) {
+        this.runtime.logger.warn('RPC rate limit hit, pausing before retry');
+        // FIXME: retry counter, exponential backoff
+        await new Promise((waitResolve) => setTimeout(waitResolve, 1000));
+        return this.getBalancesByAddrs(walletAddressArr)
+      }
+      //this.runtime.logger.error('solSrv:getBalancesByAddrs - Error fetching wallet balances:', error);
+      this.runtime.logger.error('solSrv:getBalancesByAddrs - unexpected error:', error);
       return -1;
     }
   }
@@ -1173,6 +1202,8 @@ export class SolanaService extends Service {
           continue
         }
 
+        // FIXME: pass in balance to avoid this check
+
         // balance check to protect quote rate limit
         const balances = await this.getBalancesByAddrs([pubKey])
         const bal = balances[pubKey]
@@ -1183,10 +1214,10 @@ export class SolanaService extends Service {
 
         const baseLamports = this.jupiterService.estimateLamportsNeeded({ inputMint: signal.sourceTokenCA, inAmount: intAmount })
         const ourLamports = bal * 1e9
-        console.log('baseLamports', baseLamports.toLocaleString(), 'weHave', ourLamports.toLocaleString())
+        //console.log('baseLamports', baseLamports.toLocaleString(), 'weHave', ourLamports.toLocaleString())
         // avoid wasting jupiter quote rate limit
         if (baseLamports > ourLamports) {
-          console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low to swap')
+          console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low to swap', 'baseLamports', baseLamports.toLocaleString(), 'weHave', ourLamports.toLocaleString())
           swapResponses[pubKey] = {
             success: false,
             error: 'not enough SOL'
@@ -1220,7 +1251,7 @@ export class SolanaService extends Service {
         console.log('initialQuote', initialQuote)
 
         const availableLamports = bal * 1e9
-        console.log('availableLamports', availableLamports.toLocaleString())
+        //console.log('availableLamports', availableLamports.toLocaleString())
         if (initialQuote.totalLamportsNeeded > availableLamports) {
           // we can't afford as is
           console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low, has', availableLamports.toLocaleString(), 'needs', initialQuote.totalLamportsNeeded.toLocaleString())
@@ -1297,7 +1328,7 @@ export class SolanaService extends Service {
         // Execute the swap
         let swapResponse
         const executeSwap = async (impliedSlippageBps) => {
-          console.log('excutingSwap with', impliedSlippageBps + 'bps slippage')
+          console.log('executingSwap', pubKey, signal.sourceTokenCA, signal.targetTokenCA, 'with', impliedSlippageBps + 'bps slippage')
           // convert quote into instructions
           swapResponse = await this.jupiterService.executeSwap({
             quoteResponse: initialQuote,
@@ -1349,6 +1380,8 @@ export class SolanaService extends Service {
               // getLogs expects param?
               const logs = err.logs || await err.getLogs(this.connection);
 
+              let showLogs = true
+
               if (logs) {
                 if (logs.some(l => l.includes('custom program error: 0x1771'))) {
                   console.log('Swap failed: slippage tolerance exceeded.', parseInt(impliedSlippageBps));
@@ -1369,6 +1402,7 @@ export class SolanaService extends Service {
                     // buy parameters
                     // we don't need to pay more
                     // but we can retry
+                    showLogs = false
                   }
                 }
 
@@ -1381,13 +1415,16 @@ export class SolanaService extends Service {
                   console.log('Custom program failure detected.');
                   // further custom program handling
                 }
-                console.log('logs', logs)
+
+                if (showLogs) {
+                  console.log('logs', logs)
+                }
               }
 
             }
             throw err;
           }
-          console.log('txid', txid) // should probably always log this
+          console.log(pubKey, signal.sourceTokenCA, signal.targetTokenCA, 'txid', txid) // should probably always log this
           // swapResponse is of value
           return txid
         }
@@ -1435,9 +1472,12 @@ export class SolanaService extends Service {
         //console.log('postTokenBalances', txDetails.meta.postTokenBalances)
 
         if (txDetails.meta.preTokenBalances && txDetails.meta.postTokenBalances) {
+          // find only returns the first match
           const inBal = txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey && tb.mint === signal.targetTokenCA)
           const outBal = txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey && tb.mint === signal.targetTokenCA)
           console.log('inBal', inBal?.uiTokenAmount?.uiAmount, 'outBal', outBal?.uiTokenAmount?.uiAmount)
+
+          // if selling to SOL, there won't be an account change
 
           if (outBal?.uiTokenAmount.decimals) {
             this.decimalsCache.set(signal.targetTokenCA, outBal.uiTokenAmount.decimals)
@@ -1460,7 +1500,9 @@ export class SolanaService extends Service {
               console.log('changing report to', outAmount)
             }
           } else {
-            console.log('no balances?', txDetails.meta)
+            console.log('no balances? wallet', pubKey, 'token', signal.targetTokenCA)
+            //console.log('preTokenBalances', txDetails.meta.preTokenBalances, '=>', txDetails.meta.postTokenBalances)
+            console.log('wallet', txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey), '=>', txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey))
           }
         }
 
