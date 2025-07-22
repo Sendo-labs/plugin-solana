@@ -40,6 +40,7 @@ const METADATA_PROGRAM_ID = new PublicKey(
 // hack these in here
 async function getCacheExp(runtime: IAgentRuntime, key: string) {
   const wrapper = await runtime.getCache<any>(key);
+  if (!wrapper) return false
   // if exp is in the past
   if (wrapper.exp < Date.now()) {
     // no data
@@ -397,13 +398,15 @@ export class SolanaService extends Service {
   //
 
   async getCirculatingSupply(mint: string) {
+
+   //const mintPublicKey = new PublicKey(mint);
     // 1. Fetch all token accounts holding this token
     const accounts = await this.connection.getParsedProgramAccounts(
       TOKEN_PROGRAM_ID,
       {
         filters: [
           { dataSize: 165 }, // size of token account
-          { memcmp: { offset: 0, bytes: mint.toBase58() } } // filter by mint
+          { memcmp: { offset: 0, bytes: mint } } // filter by mint
         ]
       }
     );
@@ -792,7 +795,7 @@ export class SolanaService extends Service {
      *
      * @returns {PublicKey} The public key of the instance.
      */
-    public getPublicKey(): PublicKey {
+    public getPublicKey(): PublicKey | null {
       return this.publicKey;
     }
 
