@@ -654,7 +654,10 @@ export class SolanaService extends Service {
      * @returns {Promise<any[]>} A promise that resolves to an array of token accounts.
      */
     private async getTokenAccounts() {
-      return this.getTokenAccountsByKeypair(this.publicKey as PublicKey)
+      if (this.publicKey) {
+        return this.getTokenAccountsByKeypair(this.publicKey)
+      }
+      return null
     }
 
     /**
@@ -897,6 +900,7 @@ export class SolanaService extends Service {
   // only get SOL balance
   public async getBalancesByAddrs(walletAddressArr: string[]) {
     try {
+      //console.log('walletAddressArr', walletAddressArr)
       const publicKeyObjs = walletAddressArr.map(k => new PublicKey(k));
       //console.log('getBalancesByAddrs - getMultipleAccountsInfo')
       //const accounts = await this.connection.getMultipleAccountsInfo(publicKeyObjs);
@@ -912,7 +916,9 @@ export class SolanaService extends Service {
         if (a?.lamports) {
           out[pk] = a.lamports * SolanaService.LAMPORTS2SOL
         } else {
-          out[pk] = -1
+          console.log('no lamports? a', a)
+          // null means there is no balance or the account is closed
+          out[pk] = 0
         }
       }
       return out
@@ -962,6 +968,7 @@ export class SolanaService extends Service {
       this.getBalancesByAddrs([pubKey]),
       this.getTokenAccountsByKeypair(pubKeyObj),
     ]);
+    //console.log('balances', balances)
     const solBal = balances[pubKey]
     balanceStr += 'Wallet Address: ' + pubKey + '\n'
     balanceStr += 'Current wallet contents in csv format:\n'
