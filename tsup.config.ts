@@ -6,6 +6,7 @@ export default defineConfig({
   tsconfig: './tsconfig.build.json', // Use build-specific tsconfig
   sourcemap: true,
   clean: true,
+  strict: true,
   format: ['esm'], // Ensure you're targeting CommonJS
   dts: true,
   external: [
