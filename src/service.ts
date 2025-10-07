@@ -1251,7 +1251,7 @@ export class SolanaService extends Service {
     //console.log('results', results[0]) // sample result
 
     // background slow save
-    new Promise(async resolve => {
+    (async () => {
       console.time('saveCache')
       for(const t of results) {
         const copy = {...t}
@@ -1263,7 +1263,6 @@ export class SolanaService extends Service {
 
         // one at a time because we'll get dead locks otherwise
         await this.runtime.setCache<any>(key, {
-          // sys call waste atm
           setAt: nowInMs,
           data: copy,
         });
@@ -1274,7 +1273,6 @@ export class SolanaService extends Service {
           console.log('need to hard cache', key)
           // could be a disk cache... to avoid db locking issues
           this.runtime.setCache<any>(key, {
-            // sys call waste atm
             setAt: tsInMs,
             data: copy,
           });
@@ -1283,7 +1281,6 @@ export class SolanaService extends Service {
           console.log('need to soft cache', key)
           // could be a disk cache... to avoid db locking issues
           this.runtime.setCache<any>(key, {
-            // sys call waste atm
             setAt: tsInMs,
             data: copy,
           });
@@ -1291,8 +1288,7 @@ export class SolanaService extends Service {
         */
       }
       console.timeEnd('saveCache')
-      resolve()
-    })
+    })().catch(err => console.error('solana:parseTokenAccounts - cache save failed:', err))
 
     // then convert array to keyed object
     const out = Object.fromEntries(results.map(r => [r.mint, {
@@ -1589,9 +1585,8 @@ export class SolanaService extends Service {
       for(const t of allTokens) {
         const { amount, decimals } = t.account.data.parsed.info.tokenAmount;
         this.decimalsCache.set(t.account.data.parsed.info.mint, decimals);
-        // filter out zero balances
-        // we probably shouldn't be filtering
-        if (amount !== '0') {
+        // filter out zero balances (if not includeZeroBalances)
+        if (options.includeZeroBalances || amount !== '0') {
           haveAllTokens.push(t)
         }
       }
