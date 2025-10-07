@@ -717,11 +717,8 @@ export class SolanaService extends Service {
           const { amount: raw, decimals } = t.account.data.parsed.info.tokenAmount;
           const balanceUi = Number(raw) / 10 ** decimals;
 
-          goodCache[mint] = {...c.data, uiBalance: balanceUi }
+          goodCache[mint] = { ...c.data, balanceUi }
           continue
-        }
-      }
-      //mintKeys.push(new PublicKey(t.account.data.parsed.info.mint))
       fetchTokens.push(heldTokens[i])
       misses++
     }
