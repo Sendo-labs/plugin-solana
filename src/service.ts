@@ -571,17 +571,24 @@ export class SolanaService extends Service {
   }
 
   // cache me
-  public async getTokensSymbols(mints: string[]): Promise<string | null> {
+  public async getTokensSymbols(
+    mints: string[]
+  ): Promise<Record<string, string | null>> {
     const mintKeys: PublicKey[] = mints.map(k => new PublicKey(k));
-    const metadataAddresses: PublicKey[] = await Promise.all(mintKeys.map(mk => this.getMetadataAddress(mk)))
-    const accountInfos = await this.batchGetMultipleAccountsInfo(metadataAddresses, 'getTokensSymbols')
+    const metadataAddresses: PublicKey[] = await Promise.all(
+      mintKeys.map(mk => this.getMetadataAddress(mk))
+    );
+    const accountInfos = await this.batchGetMultipleAccountsInfo(
+      metadataAddresses,
+      'getTokensSymbols'
+    );
 
-    const out = {}
-    const results = mintKeys.map((token, i) => {
-      const accountInfo = accountInfos[i];      // raw AccountInfo | null
+    const out: Record<string, string | null> = {};
+    mintKeys.forEach((token, i) => {
+      const accountInfo = accountInfos[i]; // raw AccountInfo | null
 
       if (!accountInfo || !accountInfo.data) {
-        out[token] = null
+        out[token.toBase58()] = null;
         return;
       }
 
@@ -597,9 +604,14 @@ export class SolanaService extends Service {
       // Symbol (length-prefixed string)
       const symbolLen = data.readUInt32LE(offset);
       offset += 4;
-      const symbol = data.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, '');
-      out[token] = symbol
-    })
+      const symbol =
+        data
+          .slice(offset, offset + symbolLen)
+          .toString('utf8')
+          .replace(/\0/g, '') || null;
+      out[token.toBase58()] = symbol;
+    });
+
     return out;
   }
 
