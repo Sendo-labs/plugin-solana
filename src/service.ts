@@ -133,8 +133,9 @@ export class SolanaService extends Service {
         this.subscribeToAccount(this.publicKey.toBase58(), async (accountAddress, accountInfo, context) => {
           runtime.logger.log('Updating wallet data');
           await this.updateWalletData(); // non-forced (respect: UPDATE_INTERVAL)
-        })
-
+        }).catch((error) => {
+          logger.error('Error subscribing to agent wallet updates:', error);
+        });
       })
       .catch((error) => {
         logger.error('Error initializing public key:', error);
