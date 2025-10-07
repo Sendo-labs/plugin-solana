@@ -719,6 +719,8 @@ export class SolanaService extends Service {
 
           goodCache[mint] = { ...c.data, balanceUi }
           continue
+        }
+      }
       fetchTokens.push(heldTokens[i])
       misses++
     }
@@ -1336,10 +1338,8 @@ export class SolanaService extends Service {
      * @returns {Promise<any[]>} A promise that resolves to an array of token accounts.
      */
     private async getTokenAccounts() {
-      if (this.publicKey) {
-        return this.getTokenAccountsByKeypair(this.publicKey)
-      }
-      return null
+      if (!this.publicKey) return null
+      return this.getTokenAccountsByKeypair(this.publicKey)
     }
 
     /**
@@ -1586,7 +1586,7 @@ export class SolanaService extends Service {
 
       // update decimalCache
       const haveAllTokens = []
-      for(const t of allTokens ) {
+      for(const t of allTokens) {
         const { amount, decimals } = t.account.data.parsed.info.tokenAmount;
         this.decimalsCache.set(t.account.data.parsed.info.mint, decimals);
         // filter out zero balances
