@@ -114,7 +114,7 @@ export const walletProvider: Provider = {
         text: text,
       };
     } catch (error) {
-      console.error('Error in Solana wallet provider:', error);
+      logger.error(`Error in Solana wallet provider: ${error instanceof Error ? error.message : String(error)}`);
       return { data: null, values: {}, text: '' };
     }
   },
