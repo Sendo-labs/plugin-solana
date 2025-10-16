@@ -11,7 +11,11 @@ import {
   SendTransactionError,
   LAMPORTS_PER_SOL
 } from '@solana/web3.js';
-import { MintLayout, getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, unpackAccount, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import {
+  MintLayout, getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, unpackAccount,
+  getAssociatedTokenAddressSync, ExtensionType, getExtensionData, getExtensionTypes,
+  unpackMint,
+} from "@solana/spl-token";
 import BigNumber from 'bignumber.js';
 import { SOLANA_SERVICE_NAME, SOLANA_WALLET_DATA_CACHE_KEY } from './constants';
 import { getWalletKey, KeypairResult } from './keypairUtils';
@@ -67,7 +71,7 @@ export class SolanaService extends Service {
 
   private updateInterval: NodeJS.Timer | null = null;
   private lastUpdate = 0;
-  private readonly UPDATE_INTERVAL = 120000; // 2 minutes
+  private readonly UPDATE_INTERVAL = 2 * 60_000; // 2 minutes
   private connection: Connection;
   private publicKey: PublicKey | null = null;
   private exchangeRegistry: Record<number, any> = {};
@@ -122,6 +126,16 @@ export class SolanaService extends Service {
           throw new Error('Failed to initialize public key');
         }
         this.publicKey = publicKey;
+
+        // get initial read
+        this.updateWalletData();
+        // only need to update wallet if it changes
+        this.subscribeToAccount(this.publicKey.toBase58(), async (accountAddress, accountInfo, context) => {
+          runtime.logger.log('Updating wallet data');
+          await this.updateWalletData(); // non-forced (respect: UPDATE_INTERVAL)
+        }).catch((error) => {
+          logger.error('Error subscribing to agent wallet updates:', error);
+        });
       })
       .catch((error) => {
         logger.error('Error initializing public key:', error);
@@ -258,6 +272,7 @@ export class SolanaService extends Service {
   private static readonly TOKEN_MINT_DATA_LENGTH   = 82;
 
   // could use batchGetMultipleAccountsInfo to get multiple
+  // FIXME: getAddressesTypes(addresses: string[])
   async getAddressType(address: string): Promise<string> {
     let dataLength = -1
     try {
@@ -515,6 +530,7 @@ export class SolanaService extends Service {
   }
 
   public async getMetadataAddress(mint: PublicKey): Promise<PublicKey> {
+    // not an rpc call
     const [metadataPDA] = await PublicKey.findProgramAddress(
       [
         Buffer.from("metadata"),
@@ -526,6 +542,7 @@ export class SolanaService extends Service {
     return metadataPDA;
   }
 
+  // FIXME: cache me...
   public async getTokenSymbol(mint: PublicKey): Promise<string | null> {
     const metadataAddress = await this.getMetadataAddress(mint);
     console.log('getTokenSymbol - getAccountInfo')
@@ -534,6 +551,7 @@ export class SolanaService extends Service {
     if (!accountInfo || !accountInfo.data) return null;
 
     const data = accountInfo.data;
+    //console.log('data', data)
 
     // Skip the 1-byte key and 32+32+4+len name fields (you can parse these if needed)
     let offset = 1 + 32 + 32;
@@ -541,15 +559,65 @@ export class SolanaService extends Service {
     // Name (length-prefixed string)
     const nameLen = data.readUInt32LE(offset);
     offset += 4 + nameLen;
+    //console.log('nameLen', nameLen)
 
     // Symbol (length-prefixed string)
     const symbolLen = data.readUInt32LE(offset);
     offset += 4;
+    //console.log('symbolLen', symbolLen)
+
     const symbol = data.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, '');
+    //console.log('symbol', symbol)
     return symbol;
   }
 
+  // cache me
+  public async getTokensSymbols(
+    mints: string[]
+  ): Promise<Record<string, string | null>> {
+    const mintKeys: PublicKey[] = mints.map(k => new PublicKey(k));
+    const metadataAddresses: PublicKey[] = await Promise.all(
+      mintKeys.map(mk => this.getMetadataAddress(mk))
+    );
+    const accountInfos = await this.batchGetMultipleAccountsInfo(
+      metadataAddresses,
+      'getTokensSymbols'
+    );
+
+    const out: Record<string, string | null> = {};
+    mintKeys.forEach((token, i) => {
+      const accountInfo = accountInfos[i]; // raw AccountInfo | null
+
+      if (!accountInfo || !accountInfo.data) {
+        out[token.toBase58()] = null;
+        return;
+      }
+
+      const data = accountInfo.data;
+
+      // Skip the 1-byte key and 32+32+4+len name fields (you can parse these if needed)
+      let offset = 1 + 32 + 32;
+
+      // Name (length-prefixed string)
+      const nameLen = data.readUInt32LE(offset);
+      offset += 4 + nameLen;
+
+      // Symbol (length-prefixed string)
+      const symbolLen = data.readUInt32LE(offset);
+      offset += 4;
+      const symbol =
+        data
+          .slice(offset, offset + symbolLen)
+          .toString('utf8')
+          .replace(/\0/g, '') || null;
+      out[token.toBase58()] = symbol;
+    });
+
+    return out;
+  }
+
   public async getSupply(CAs) {
+    //console.log('getSupply CAs', CAs.length)
     const mintKeys: PublicKey[] = CAs.map(ca => new PublicKey(ca));
     const mintInfos = await this.batchGetMultipleAccountsInfo(mintKeys, 'getSupply')
 
@@ -587,39 +655,590 @@ export class SolanaService extends Service {
     return out
   }
 
-  public async parseTokenAccounts(heldTokens) {
+  public async parseTokenAccounts(heldTokens, options = {}) {
     // decimalsCache means we don't need all I think
+    // we need structure token cache
     // stil need them for symbol
-    const mintKeys: PublicKey[] = heldTokens.map(t => new PublicKey(t.account.data.parsed.info.mint));
-    const metadataAddresses: PublicKey[] = await Promise.all(mintKeys.map(mk => this.getMetadataAddress(mk)))
+
+    // ATAs?
+    /*
+    for(const t of heldTokens) {
+      //pubkey / account
+      // account: data, owner, space, lamports, rentEpoch, executables
+      console.log('held', t.pubkey.toBase58(), t.account.data.program, t.account.data.parsed)
+      // data: program, parsed, ??
+      // parsed: type: "account", info
+      // t22 info: extensions, isNative, mint, owner, state, tokenAmount (amount, decimals, uiAmount, uiAmountString)
+      // spl info: isNative, mint, owner, state, tokenAmount (amount, decimals, uiAmount, uiAmountString)
+    }
+    */
+
+    const nowInMs = Date.now()
+
+    //console.log('cache', cache)
+
+    //const mintKeys: PublicKey[] = []
+    const acceptableInMs = options.notOlderThan ?? 60 * 60_000 // 1 hour default
+    let cache = []
+    // what about immutable?
+    if (acceptableInMs !== 0) {
+      console.time('cacheCheck')
+      cache = await Promise.all(heldTokens.map(t => this.runtime.getCache<any>('solana_token_meta_' + t.account.data.parsed.info.mint)));
+      console.timeEnd('cacheCheck')
+    }
+
+    let misses = 0
+    const fetchTokens = []
+    const goodCache = {}
+    for(const i in heldTokens) {
+      const t = heldTokens[i]
+      if (cache[i]) {
+        const c = cache[i]
+        let useCache = false
+        if (c.data.isMutable === false) {
+          // immutable data is always good
+          useCache = true
+        } else //otherwise
+        if (acceptableInMs !== 0) {
+          const diff = nowInMs - c.setAt
+          //console.log('cache for', t.account.data.parsed.info.mint, 'is', diff.toLocaleString() + 'ms old')
+          // freshness check
+          if (diff < acceptableInMs) {
+            useCache = true
+          //} else {
+            //console.log('parseTokenAccounts - MISS', mint)
+          }
+        }
+        //useCache = false
+        if (useCache) {
+          // HIT
+          //console.log('parseTokenAccounts - HIT', mint)
+          const mint = t.account.data.parsed.info.mint
+          //console.log('info', t.account.data.parsed.info)
+          const { amount: raw, decimals } = t.account.data.parsed.info.tokenAmount;
+          const balanceUi = Number(raw) / 10 ** decimals;
+
+          goodCache[mint] = { ...c.data, balanceUi }
+          continue
+        }
+      }
+      fetchTokens.push(heldTokens[i])
+      misses++
+    }
+    this.runtime.logger.debug('parseTokenAccounts havs', heldTokens.length - misses + '/' + heldTokens.length, 'in cache (1hr default)')
+
+    //const mintKeys: PublicKey[] = heldTokens.map(t => new PublicKey(t.account.data.parsed.info.mint))
+
+    // --- build unique mint sets by program ---
+    const toB58 = (pk: string | PublicKey) => typeof pk === "string" ? pk : pk.toBase58()
+
+    const TOKEN_ID_B58  = TOKEN_PROGRAM_ID.toBase58()
+    const TOKEN2022_B58 = TOKEN_2022_PROGRAM_ID.toBase58()
+
+    const t22MintKeys: PublicKey[] = Array.from(new Set(
+      fetchTokens
+        .filter(t => toB58(t.account.owner) === TOKEN2022_B58)
+        .map(t => t.account.data.parsed.info.mint as string)
+    )).map(s => new PublicKey(s))
+
+    const classicMintKeys: PublicKey[] = Array.from(new Set(
+      fetchTokens
+        .filter(t => toB58(t.account.owner) === TOKEN_ID_B58)
+        .map(t => t.account.data.parsed.info.mint as string)
+    )).map(s => new PublicKey(s))
+
+    // --- phase 1: batch fetch Token-2022 mint *only* ---
+
+    // we might want to get all keys here so we can get the supply
+    const allMintKeys: PublicKey[] = Array.from(new Set(
+      fetchTokens.map(t => t.account.data.parsed.info.mint as string)
+    )).map(s => new PublicKey(s))
+
+    //
+    const mintInfos = await this.batchGetMultipleAccountsInfo(allMintKeys, "t22-mints")
+
+    /*
+    const t22MintInfos = t22MintKeys.length
+      ? await this.batchGetMultipleAccountsInfo(t22MintKeys, "t22-mints")
+      : [];
+    */
+
+    // detect who has the TLV TokenMetadata extension
+    const hasT22Meta = new Set<string>();
+    // detect TLV + compute "isMutable" from updateAuthority (Some/None)
+    const t22IsMutable = new Map<string, boolean>();         // mint -> isMutable
+
+    /*
+    function readT22IsMutable(ext: Buffer): { isMutable: boolean } {
+      // Token-2022 TokenMetadata starts with Option<Pubkey>:
+      // tag (u8: 0=None, 1=Some) + pubkey (32 bytes if Some), then name(32), symbol(10), uri(200)...
+      const tag = ext.readUInt8(0);
+      if (tag === 0) return { isMutable: false };            // no update authority → immutable
+      if (tag === 1) return { isMutable: true };             // has update authority → mutable
+      // defensive fallback if layout/version differs:
+      return { isMutable: true };
+    }
+    */
+
+    // top of the function (near other maps/sets)
+    const t22Symbols = new Map<string, string>(); // mint -> symbol (Token-2022 TLV)
+    const mpSymbols  = new Map<string, string>(); // mint -> symbol (Metaplex PDA)
+    // metadata-pointer map (mint -> pointer address)
+    const t22PtrAddrByMint = new Map<string, PublicKey>();
+    const mpSupply = new Map<string, string>();          // mint -> supply
+
+    // Trim trailing NULs and whitespace
+    const stripNulls = (s: string) => s.replace(/\u0000+$/g, "").trim();
+    // helper to read fixed-size, null-padded utf8 strings (Token-2022 TLV)
+    /*
+    function readFixedCString(buf: Buffer, start: number, len: number): string {
+      const slice = buf.subarray(start, start + len);
+      const nul = slice.indexOf(0);
+      const end = nul >= 0 ? nul : slice.length;
+      return stripNulls(slice.subarray(0, end).toString("utf8").trim());
+    }
+    */
+
+    // Borsh-encoded string: u32 LE length + bytes (Metaplex PDA)
+    function readBorshStringSafe(buf: Buffer, offObj: { off: number }): string {
+      if (offObj.off + 4 > buf.length) return "";               // truncated
+      const len = buf.readUInt32LE(offObj.off);
+      offObj.off += 4;
+      if (len < 0 || offObj.off + len > buf.length) {
+        // corrupted length; consume the remainder to avoid infinite loops
+        const bytes = buf.subarray(offObj.off, buf.length);
+        offObj.off = buf.length;
+        return stripNulls(bytes.toString("utf8"));
+      }
+      const bytes = buf.subarray(offObj.off, offObj.off + len);
+      offObj.off += len;
+      return stripNulls(bytes.toString("utf8"));
+    }
+
+    function readU32LE(buf: Buffer, offObj: { off: number }): number {
+      if (offObj.off + 4 > buf.length) throw new Error('oob u32');
+      const v = buf.readUInt32LE(offObj.off);
+      offObj.off += 4;
+      return v;
+    }
+
+    function readVecU8AsString(buf: Buffer, offObj: { off: number }): string {
+      const len = readU32LE(buf, offObj);
+      if (len < 0 || offObj.off + len > buf.length) throw new Error('oob str');
+      const s = buf.subarray(offObj.off, offObj.off + len).toString('utf8');
+      offObj.off += len;
+      return s.trim();
+    }
+    function allZero32(b: Buffer) { for (let i=0;i<32;i++) if (b[i]!==0) return false; return true; }
+
+    // Parse the Token-2022 TokenMetadata TLV (just the Value slice)
+    function parseToken2022MetadataTLV(ext: Buffer): {
+      isMutable: boolean; updateAuthority?: string; name: string; symbol: string; uri: string;
+    } {
+      const o = { off: 0 };
+      // 32B updateAuthority (all-zero = None)
+      const uaBytes = ext.subarray(o.off, o.off + 32); o.off += 32;
+      const isMutable = !allZero32(uaBytes);
+      const updateAuthority = isMutable ? new PublicKey(uaBytes).toBase58() : undefined;
+
+      // 32B mint
+      const mint = new PublicKey(ext.subarray(o.off, o.off + 32)).toBase58(); o.off += 32;
+
+      // Strings
+      const name = readVecU8AsString(ext, o);
+      const symbol = readVecU8AsString(ext, o);
+      //console.log('t22 symbol', symbol)
+      const uri = readVecU8AsString(ext, o);
+
+      // Optional Vec<(String,String)>
+      const additional: Array<[string,string]> = [];
+      if (o.off + 4 <= ext.length) {
+        const n = readU32LE(ext, o);
+        for (let i = 0; i < n; i++) additional.push([readVecU8AsString(ext, o), readVecU8AsString(ext, o)]);
+      }
+      return { isMutable, updateAuthority, mint, name, symbol, uri, additional: additional.length ? additional : undefined };
+    }
+
+    function formatSupplyUiAmount(amount: bigint, decimals: number): string {
+      let denom = 1n;
+      for (let i = 0; i < decimals; i++) denom *= 10n;
+
+      const whole = amount / denom;
+      const frac = (amount % denom).toString().padStart(decimals, '0');
+      return decimals === 0 ? whole.toString() : `${whole}.${frac}`.replace(/\.$/, '');
+    }
+
+    //console.log('t22MintKeys', t22MintKeys.length)
+    //t22MintKeys.forEach((mk, i) => {
+    allMintKeys.forEach((mk, i) => {
+      //const info = t22MintInfos[i];
+      const info = mintInfos[i];
+
+      if (!info?.data) return;
+      //console.log('token22 info', mk.toBase58(), info)
+      // lamports, data, owner, executable, rentEpoch, space
+
+      // 1) Sanity: owner must be TOKEN_2022_PROGRAM_ID
+      const isT22 = info.owner?.toBase58?.() === TOKEN_2022_PROGRAM_ID.toBase58()
+      //if (!isT22) {
+        //console.warn("mint not owned by TOKEN_2022", mk.toBase58(), info.owner?.toBase58?.());
+      //}
+
+      // 2) List all extensions present
+      //const exts = getExtensionTypes(info.data); // returns ExtensionType[]
+      //console.log(mk.toBase58(), "extensions:", exts.map(x => ExtensionType[x] ?? x));
+      const mintKeyStr = mk.toBase58()
+
+      if (isT22) {
+        const parsedMint = unpackMint(mk, info, TOKEN_2022_PROGRAM_ID);
+        // parsedMint.address.toBase58(), is the same as mintKeyStr
+        const uiSupply = formatSupplyUiAmount(parsedMint.supply, parsedMint.decimals)
+        //console.log('t22', mintKeyStr, 'parsedMint', parsedMint.supply, parsedMint.decimals, '=>', uiSupply)
+        // address, mintAuthority, supply, decimals, isInitialized, freezeAuthority, tlvData
+
+        mpSupply.set(mintKeyStr, uiSupply) // as BigNumber
+        if (this.decimalsCache.get(mintKeyStr) !== parsedMint.decimals) {
+          console.log('decimalsCache', this.decimalsCache.get(mintKeyStr), '!== parsedMint.decimals', parsedMint.decimals)
+        }
+        this.decimalsCache.set(mintKeyStr, parsedMint.decimals)
+        // not sure this is right
+        // address, mintAuthority, supply, decimals, isInitialized, freezeAuthority, tlvData
+
+        const tlv = parsedMint.tlvData ?? Buffer.alloc(0);
+        //const exts2 = getExtensionTypes(tlv);
+        //console.log(mk.toBase58(), "extensions:", exts2.map(x => ExtensionType[x] ?? x));
+
+        // TokenMetadata TLV
+        const mdExt = getExtensionData(ExtensionType.TokenMetadata, tlv);
+        if (mdExt) {
+          //console.log('tlv mdExt', mdExt)
+          const res = parseToken2022MetadataTLV(mdExt)
+          //console.log('res', res)
+
+          hasT22Meta.add(mintKeyStr);
+          t22IsMutable.set(mintKeyStr, res.isMutable);
+          t22Symbols.set(mintKeyStr, res.symbol);
+
+          /*
+          //const res2 = parseToken2022MetadataTLV(tlv)
+          //console.log('res2', res2)
+          console.log('token22 has ext.TokenMetadata', mk.toBase58())
+
+          const tag = mdExt.readUInt8(0);       // 0=None, 1=Some(updateAuthority)
+          let off = 1 + (tag === 1 ? 32 : 0);
+          const name   = readFixedCString(mdExt, off, 32); off += 32;
+          const symbol = readFixedCString(mdExt, off, 10); off += 10;
+          console.log('t22', symbol)
+          hasT22Meta.add(mk.toBase58());
+          t22IsMutable.set(mk.toBase58(), tag === 1);
+          t22Symbols.set(mk.toBase58(), symbol);
+          */
+          return;
+        }
+      } else {
+        // spl token
+        const data = info?.data;
+        const header = data.subarray(0, MintLayout.span);
+        const mintData = MintLayout.decode(header);
+        //console.log('spl mintData', mintData)
+        const uiSupply = formatSupplyUiAmount(mintData.supply, mintData.decimals)
+        //console.log('spl', mintKeyStr, 'mintData', mintData.supply, mintData.decimals, '=>', uiSupply.toLocaleString())
+        mpSupply.set(mintKeyStr, uiSupply) // as BigNumber
+        if (this.decimalsCache.get(mintKeyStr) !== mintData.decimals) {
+          console.log('decimalsCache', this.decimalsCache.get(mintKeyStr), '!== mintData.decimals', mintData.decimals)
+        }
+        this.decimalsCache.set(mintKeyStr, mintData.decimals)
+      }
+
+      /*
+      const ext = getExtensionData(ExtensionType.TokenMetadata, info.data);
+      if (ext) {
+        console.log('token22 has ext', mk.toBase58())
+
+        // mutable
+        hasT22Meta.add(mk.toBase58());
+        t22IsMutable.set(mk.toBase58(), readT22IsMutable(ext).isMutable);
+
+        // symbol
+        // decode fixed fields: name(32), symbol(10), uri(200)
+        let off = 1 + (tag === 1 ? 32 : 0); // skip tag + optional pubkey
+        const name   = readFixedCString(ext, off, 32); off += 32;
+        const symbol = readFixedCString(ext, off, 10); off += 10;
+        console.log('t22 name', name, 'symbol', symbol)
+        // (uri would be at off with length 200 if you need it)
+
+        t22Symbols.set(mk.toBase58(), symbol);
+        return;
+      }
+      // Fallback: check for Metadata Pointer extension
+      const ptrExt = getExtensionData(ExtensionType.MetadataPointer, info.data);
+      if (!ptrExt) {
+        console.log('token22 no metaplex info')
+        return;
+      }
+
+      // Layout: 32 bytes authority + 32 bytes metadataAddress
+      if (ptrExt.length < 64) {
+        console.warn("MetadataPointer too short", mk.toBase58(), ptrExt.length);
+        return;
+      }
+      const metaAddr = new PublicKey(ptrExt.subarray(32, 64));
+      const mint58 = mk.toBase58();
+      t22PtrAddrByMint.set(mint58, metaAddr);
+      t22PtrMintByAddr.set(metaAddr.toBase58(), mint58);
+      */
+    });
+
+    // --- phase 2: fetch ONLY the Metaplex PDAs we actually need ---
+    // (classic mints + Token-2022 mints that DON'T have the TLV)
+    const missingT22s = t22MintKeys.filter(m => !hasT22Meta.has(m.toBase58()))
+    console.log('missingT22s', missingT22s.length)
+    const mpMintKeys = [...classicMintKeys, ...missingT22s];
+
+    //console.log('mpMintKeys', mpMintKeys.length)
+
+    const mpAddrs = await Promise.all(mpMintKeys.map(m => this.getMetadataAddress(m)));
+    const mpInfos = mpAddrs.length
+      ? await this.batchGetMultipleAccountsInfo(mpAddrs, "metaplex-md")
+      : [];
+
+    // parse Metaplex isMutable (u8) after primarySaleHappened
+    const mpIsMutable = new Map<string, boolean>();          // mint -> isMutable
+    mpMintKeys.forEach((mk, i) => {
+      const acc = mpInfos[i];
+      //console.log('acc', acc)
+      // metadata address
+      // lamports, data, owner, executable, rentEpoch, space
+      const data = acc?.data;
+      if (!data?.length) return;
+      //if (!data || data.length < MintLayout.span) return; // must be a mint account
+
+      const mintAddrStr = mk.toBase58()
+
+      /*
+      if (classicMintKeys.find(k => k.equals(mk))) {
+        const header = data.subarray(0, MintLayout.span);
+        const mintData = MintLayout.decode(header);
+        console.log('classic', mintData)
+      } else {
+        console.log('t22')
+      }
+      */
+
+      /*
+      const header = data.subarray(0, MintLayout.span);
+      const mintData = MintLayout.decode(header);
+
+      const rawSupply = BigInt(mintData.supply.toString()); // BN -> bigint
+      const decimals  = mintData.decimals as number;
+      const isInit    = !!mintData.isInitialized;
+      console.log('rawSupply', rawSupply2, 'decimals', decimals)
+
+      const uiSupply = Number(rawSupply) / 10 ** mintData.decimals;
+      console.log('mintData', mintData)
+      mpSupply.set(mintAddrStr, uiSupply)
+      */
+
+      const limit = data.length;
+      const need = (n: number) => n <= limit;
+
+      let off = 1 + 32 + 32; // key + updateAuthority + mint
+      if (!need(off)) return;
+
+      const offObj = { off };
+      const name   = readBorshStringSafe(data, offObj);
+      const symbol = readBorshStringSafe(data, offObj);
+      /* const uri    = */ readBorshStringSafe(data, offObj);
+
+      if (offObj.off + 2 > limit) return;
+      /* const sellerFee = */ data.readUInt16LE(offObj.off); offObj.off += 2;
+
+      if (offObj.off + 1 > limit) return;
+      const hasCreators = data.readUInt8(offObj.off); offObj.off += 1;
+
+      if (hasCreators) {
+        if (offObj.off + 4 > limit) return;
+        const n = data.readUInt32LE(offObj.off); offObj.off += 4;
+        const creatorSize = 32 + 1 + 1;
+        const bytesNeeded = n * creatorSize;
+        if (offObj.off + bytesNeeded > limit) return;
+        offObj.off += bytesNeeded;
+      }
+
+      if (offObj.off + 1 > limit) return; // primarySaleHappened (u8)
+      offObj.off += 1;
+
+      if (offObj.off + 1 > limit) return; // isMutable (u8)
+      const isMutable = data.readUInt8(offObj.off) === 1;
+
+      mpIsMutable.set(mintAddrStr, isMutable);
+      mpSymbols.set(mintAddrStr, symbol);
+    });
+
+    /*
+    // --- build the Metaplex PDA list we actually need ---
+    const mintsNeedingMP = [
+      ...classicMintKeys,
+      ...t22MintKeys.filter(mk => !hasT22Meta.has(mk.toBase58())),
+    ];
+    const mpAddrs = await Promise.all(mintsNeedingMP.map(m => this.getMetadataAddress(m)));
+
+    // --- one "mega" batch: t22 mints (already fetched) + needed PDAs ---
+    const allAddrs: PublicKey[] = [...mintsNeedingMP, ...t22MintKeys].map((pk, i) => pk); // just to show the idea
+    const allInfos = await this.batchGetMultipleAccountsInfo(
+      [...mpAddrs, ...t22MintKeys],                 // << one RPC call in your helper (it can chunk internally)
+      "mega"
+    );
+    // --- quick indexers by address ---
+    const infoByAddr = new Map<string, any>();
+    [...mpAddrs, ...t22MintKeys].forEach((pk, i) => infoByAddr.set(pk.toBase58(), allInfos[i]));
+
+    // helper getters
+    const getMpInfo   = (mint: PublicKey) => infoByAddr.get((await this.getMetadataAddress(mint)).toBase58()) ?? null;
+    const getT22Mint  = (mint: PublicKey) => infoByAddr.get(mint.toBase58()) ?? null;
+    */
+
+    const t22Set = new Set(t22MintKeys.map(k => k.toBase58()));
+
+    const results = heldTokens.map((t) => {
+      const mintStr = t.account.data.parsed.info.mint as string;
+      const mintKey = new PublicKey(mintStr);
+      const is2022  = t22Set.has(mintStr);
+
+      // decimals / balance (unchanged)
+      const { amount: raw, decimals } = t.account.data.parsed.info.tokenAmount;
+      const balanceUi = Number(raw) / 10 ** decimals;
+
+      // pick the right source for isMutable
+      const isMutable =
+        (is2022 && hasT22Meta.has(mintStr))
+          ? (t22IsMutable.get(mintStr) ?? null)
+          : (mpIsMutable.get(mintStr) ?? null);
+
+      const symbol =
+        (is2022 && hasT22Meta.has(mintStr))
+          ? (t22Symbols.get(mintStr) ?? null)
+          : (mpSymbols.get(mintStr) ?? null);
+
+      let supply = mpSupply.get(mintStr) ?? null
+      if (supply) supply = parseFloat(supply)
+
+      return {
+        mint: mintKey.toBase58(),
+        symbol,
+        supply,
+        tokenProgram: is2022 ? "Token-2022" : "Token",
+        decimals,
+        balanceUi,
+        isMutable, // boolean | null
+      };
+    });
+
+    /*
+    //const mintInfos = await this.batchGetMultipleAccountsInfo(t22MintKeys, "parseTokenAccounts-t22-mints")
+    //const accountInfos = await this.batchGetMultipleAccountsInfo(metadataAddresses, 'parseTokenAccounts')
+
+    const [mintInfos, accountInfos] = await Promise.all([
+      this.batchGetMultipleAccountsInfo(t22MintKeys, "parseTokenAccounts-t22-mints"),
+      this.batchGetMultipleAccountsInfo(metadataAddresses, 'parseTokenAccounts'),
+    ])
+    const t22MetaByMint = new Map<string, { name: string; symbol: string; uri: string } | null>();
+    t22MintKeys.forEach((mintKey, i) => {
+      const info = mintInfos[i];
+      if (!info?.data) { t22MetaByMint.set(mintKey.toBase58(), null); return; }
+      const ext = getExtensionData(ExtensionType.TokenMetadata, info.data);
+      if (!ext) { t22MetaByMint.set(mintKey.toBase58(), null); return; }
+      t22MetaByMint.set(mintKey.toBase58(), decodeT22TokenMetadata(ext));
+    });
+    */
+
+
     //console.log('parseTokenAccounts - getMultipleAccountsInfo')
     //const accountInfos = await this.connection.getMultipleAccountsInfo(metadataAddresses);
-    const accountInfos = await this.batchGetMultipleAccountsInfo(metadataAddresses, 'parseTokenAccounts')
     //console.log('accountInfos', accountInfos) // works
 
+    /*
     const results = heldTokens.map((token, i) => {
       const metadataInfo = accountInfos[i];      // raw AccountInfo | null
+      //console.log('metadataInfo', metadataInfo)
       const mintKey      = mintKeys[i];
+
+      const mintOwner = metadataInfo?.owner; // PublicKey | undefined
+      const isToken2022 = !!mintOwner && mintOwner.equals(TOKEN_2022_PROGRAM_ID);
+      const isClassic   = !!mintOwner && mintOwner.equals(TOKEN_PROGRAM_ID);
+
+      if (metadataInfo === null) {
+        // what's going on with these? atas?
+        // NFTs and token2022
+        console.log('mdInfo null for', mintKey.toBase58())
+      }
 
       // ----- Metaplex metadata deserialisation -----
       let symbol: string | null = null;
+      let updateAuthority: PublicKey | null = null;
+      let isMutable: boolean | null = null;
+
+      function readString(data: Buffer, offset: number) {
+        const len = data.readUInt32LE(offset);
+        const start = offset + 4;
+        const end = start + len;
+        const value = data.slice(start, end).toString("utf8").replace(/\0/g, "");
+        return { value, offset: end };
+      }
+
       if (metadataInfo?.data?.length) {
         const data = metadataInfo.data;
 
-        let offset = 1 + 32 + 32;        // key + updateAuthority + mint
-        const nameLen   = data.readUInt32LE(offset);  offset += 4 + nameLen;
-        const symbolLen = data.readUInt32LE(offset);  offset += 4;
+        // key (1) + updateAuthority (32) + mint (32)
+        updateAuthority = new PublicKey(data.slice(1, 33));
+        let offset = 1 + 32 + 32;
 
-        symbol = data
-          .slice(offset, offset + symbolLen)
-          .toString("utf8")
-          .replace(/\0/g, "");           // trim right-padding
+        // name
+        ({ offset } = readString(data, offset));
+
+        // symbol
+        const sym = readString(data, offset);
+        symbol = sym.value;
+        offset = sym.offset;
+
+        // uri
+        ({ offset } = readString(data, offset));
+
+        // sellerFeeBasisPoints (u16)
+        offset += 2;
+
+        // creators: Option<Vec<Creator>>
+        const hasCreators = data.readUInt8(offset); offset += 1;
+        if (hasCreators) {
+          const n = data.readUInt32LE(offset); offset += 4;
+          // each creator: 32 (pubkey) + 1 (verified) + 1 (share)
+          offset += n * (32 + 1 + 1);
+        }
+
+        // primarySaleHappened (u8)
+        const primarySaleHappened = data.readUInt8(offset) === 1; offset += 1;
+
+        // isMutable (u8)
+        isMutable = data.readUInt8(offset) === 1; offset += 1;
+
+        // (Optional fields may follow; no need to parse them to get isMutable)
       }
 
       // ----- Token-account figures (already parsed) -----
+      //console.log('accountdata', token.account.data.parsed)
       const { amount: raw, decimals } = token.account.data.parsed.info.tokenAmount;
-      this.decimalsCache.set(token.account.data.parsed.info.mint, decimals);
+      this.decimalsCache.set(mintKey, decimals);
+
+      //if (mintKey.toBase58() !== token.account.data.parsed.info.mint) {
+        //console.log('NOT_EQUAL', mintKey, token.account.data.parsed.info.mint)
+      //}
+
+      if (!isMutable) {
+        //console.log('hard caching', mintKey)
+      }
+
       const balanceUi = Number(raw) / 10 ** decimals;
+
 
       return {
         mint: mintKey.toBase58(),
@@ -628,14 +1247,76 @@ export class SolanaService extends Service {
         balanceUi,
       };
     });
-    //console.log('results', results)
+    */
+    // an array
+    //console.log('results', results[0]) // sample result
 
-    // then convert to object
+    // background slow save
+    (async () => {
+      console.time('saveCache')
+      for(const t of results) {
+        const copy = {...t}
+        delete copy.balanceUi
+        delete copy.mint
+        const key = 'solana_token_meta_' + t.mint
+        // we're just caching them all
+        //console.log('need to cache', key)
+
+        // one at a time because we'll get dead locks otherwise
+        await this.runtime.setCache<any>(key, {
+          setAt: nowInMs,
+          data: copy,
+        });
+        /*
+        if (t.isMutable === false) {
+          delete copy.isMutable
+          const key = 'solana_token_meta_' + t.mint
+          console.log('need to hard cache', key)
+          // could be a disk cache... to avoid db locking issues
+          this.runtime.setCache<any>(key, {
+            setAt: tsInMs,
+            data: copy,
+          });
+        } else {
+          const key = 'solana_token_muta_meta_' + t.mint
+          console.log('need to soft cache', key)
+          // could be a disk cache... to avoid db locking issues
+          this.runtime.setCache<any>(key, {
+            setAt: tsInMs,
+            data: copy,
+          });
+        }
+        */
+      }
+      console.timeEnd('saveCache')
+    })().catch(err => console.error('solana:parseTokenAccounts - cache save failed:', err))
+
+    // then convert array to keyed object
     const out = Object.fromEntries(results.map(r => [r.mint, {
       symbol: r.symbol,
+      supply: r.supply,
+      tokenProgram: r.tokenProgram,
       decimals: r.decimals,
       balanceUi: r.balanceUi,
+      isMutable: r.isMutable,
     }]));
+
+    /*
+    for(const i in heldTokens) {
+      if (goodCache[i]) {
+        const t = heldTokens[i]
+        const mint = t.account.data.parsed.info.mint
+        console.log('loading', mint, 'from cache', t)
+        out[mint] = goodCache[i]
+        out[mint].balanceUi = t.balanceUi
+        out[mint].isMutable = false
+      }
+    }
+    */
+    for(const mint in goodCache) {
+      out[mint] = goodCache[mint]
+    }
+
     //console.log('out', out)
     return out
   }
@@ -654,10 +1335,8 @@ export class SolanaService extends Service {
      * @returns {Promise<any[]>} A promise that resolves to an array of token accounts.
      */
     private async getTokenAccounts() {
-      if (this.publicKey) {
-        return this.getTokenAccountsByKeypair(this.publicKey)
-      }
-      return null
+      if (!this.publicKey) return null
+      return this.getTokenAccountsByKeypair(this.publicKey)
     }
 
     /**
@@ -706,6 +1385,7 @@ export class SolanaService extends Service {
             const walletData = await this.birdeyeFetchWithRetry(
               `${PROVIDER_CONFIG.BIRDEYE_API}/v1/wallet/token_list?wallet=${this.publicKey.toBase58()}`
             );
+            // only good for checking envelope
             //console.log('walletData', walletData)
 
             if (walletData?.success && walletData?.data) {
@@ -713,6 +1393,27 @@ export class SolanaService extends Service {
               const totalUsd = new BigNumber(data.totalUsd.toString());
               const prices = await this.fetchPrices();
               const solPriceInUSD = new BigNumber(prices.solana.usd);
+
+
+              const missingSymbols = data.items.filter(i => !i.symbol)
+
+              //console.log('data.items', data.items)
+              if (missingSymbols.length) {
+                const symbols = await this.getTokensSymbols(missingSymbols.map(i => i.address))
+                let missing = false
+                for(const i in data.items) {
+                  const item = data.items[i]
+                  if (symbols[item.address]) {
+                    data.items[i].symbol = symbols[item.address]
+                  } else {
+                    console.log('solana::updateWalletData - no symbol for', item.address, symbols[item.address])
+                    missing = true
+                  }
+                }
+                if (missing) {
+                  console.log('symbols', symbols)
+                }
+              }
 
               const portfolio: WalletPortfolio = {
                 totalUsd: totalUsd.toString(),
@@ -737,7 +1438,7 @@ export class SolanaService extends Service {
               return portfolio;
             }
           } catch (e) {
-            console.log('solana wallet exception err', e);
+            console.log('solana::updateWalletData - exception err', e);
           }
         }
 
@@ -848,13 +1549,16 @@ export class SolanaService extends Service {
     try {
       const now = Date.now()
       let check = false
-      if (options.ttl !== 0) {
+      // default is undefined, which will run thecheck
+      if (options.notOlderThan !== 0) {
         check = await this.runtime.getCache<any>(key)
         if (check) {
           // how old is this data, do we care
           const diff = now - check.fetchedAt
           // 1s - 5min cache?
-          if (diff < 60_000) {
+          // FIXME: options driven...
+          const acceptableInMs = options.notOlderThan ?? 60_000 // default
+          if (diff < acceptableInMs) {
             console.log('getTokenAccountsByKeypair cache HIT, its', diff.toLocaleString() + 'ms old')
             return check.data
           }
@@ -862,10 +1566,32 @@ export class SolanaService extends Service {
         }
       }
       console.log('getTokenAccountsByKeypair - getParsedTokenAccountsByOwner', walletAddress.toString())
-      const accounts = await this.connection.getParsedTokenAccountsByOwner(walletAddress, {
-        programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-      });
-      const haveTokens = accounts.value.filter(account => account.account.data.parsed.info.tokenAmount.uiAmount > 0)
+      const [accounts, token2022s] = await Promise.all([
+        this.connection.getParsedTokenAccountsByOwner(walletAddress, {
+          programId: TOKEN_PROGRAM_ID, // original SPL
+        }),
+        this.connection.getParsedTokenAccountsByOwner(walletAddress, {
+          programId: TOKEN_2022_PROGRAM_ID, // Token 2022
+        }),
+      ])
+      //console.log('token2022s', token2022s)
+      //const haveToken22s = token2022s.value.filter(account => account.account.data.parsed.info.tokenAmount.amount !== '0')
+      //console.log('haveToken22s', haveToken22s)
+      //for(const t of token2022s.value) { console.log('t2022 account.data', t.account.data) }
+      //const haveTokens = accounts.value.filter(account => account.account.data.parsed.info.tokenAmount.amount !== '0')
+      const allTokens = [...token2022s.value, ...accounts.value]
+
+      // update decimalCache
+      const haveAllTokens = []
+      for(const t of allTokens) {
+        const { amount, decimals } = t.account.data.parsed.info.tokenAmount;
+        this.decimalsCache.set(t.account.data.parsed.info.mint, decimals);
+        // filter out zero balances (if not includeZeroBalances)
+        if (options.includeZeroBalances || amount !== '0') {
+          haveAllTokens.push(t)
+        }
+      }
+
       // do we have old data
       if (check) {
         // should we compare haveTokens with the old data we have
@@ -873,9 +1599,9 @@ export class SolanaService extends Service {
       }
       await this.runtime.setCache<any>(key, {
         fetchedAt: now,
-        data: haveTokens
+        data: haveAllTokens
       })
-      return haveTokens
+      return haveAllTokens
     } catch (error) {
       logger.error('Error fetching token accounts:', error);
       return [];
@@ -951,7 +1677,7 @@ export class SolanaService extends Service {
     balanceStr += 'Wallet Address: ' + pubKey + '\n'
     balanceStr += '  Token Address (Symbol)\n'
     balanceStr += '  So11111111111111111111111111111111111111111 ($sol) balance: ' + (solBal ?? 'unknown') + '\n'
-    const tokens = await this.parseTokenAccounts(heldTokens)
+    const tokens = await this.parseTokenAccounts(heldTokens) // options
     for (const ca in tokens) {
       const t = tokens[ca]
       balanceStr += '  ' + ca + ' ($' + t.symbol + ') balance: ' + t.balanceUi + '\n'
@@ -974,7 +1700,7 @@ export class SolanaService extends Service {
     balanceStr += 'Current wallet contents in csv format:\n'
     balanceStr += 'Token Address,Symbol,Balance\n'
     balanceStr += 'So11111111111111111111111111111111111111111,sol,' + (solBal ?? 'unknown') + '\n'
-    const tokens = await this.parseTokenAccounts(heldTokens)
+    const tokens = await this.parseTokenAccounts(heldTokens) // options
     for (const ca in tokens) {
       const t = tokens[ca]
       balanceStr += ca + ',' + t.symbol + ',' + t.balanceUi + '\n'
@@ -1093,6 +1819,9 @@ export class SolanaService extends Service {
         return false;
       }
 
+      //await connection.removeAccountChangeListener(subscriptionId);
+
+      /*
       const ws = this.connection.connection._rpcWebSocket;
       const success = await ws.call('accountUnsubscribe', [subscriptionId]);
 
@@ -1102,6 +1831,8 @@ export class SolanaService extends Service {
       }
 
       return success;
+      */
+      //
     } catch (error) {
       logger.error('Error unsubscribing from account:', error);
       throw error;
@@ -1259,6 +1990,11 @@ export class SolanaService extends Service {
         });
         // no decimals
         console.log('initialQuote', initialQuote)
+        // a percentage over the requested...
+        if (initialQuote.totalLamportsNeeded > baseLamports) {
+          console.log('initialQuote fee over estimate: ', baseLamports.toLocaleString())
+          console.log('routes', initialQuote.routePlan)
+        }
 
         const availableLamports = bal * 1e9
         //console.log('availableLamports', availableLamports.toLocaleString())
@@ -1296,7 +2032,7 @@ export class SolanaService extends Service {
         */
         // amount is in atomic units (input token)
         //
-        console.log('adjusted amount', amount.toLocaleString(), 'price impact slippage', slippage)
+        console.log('adjusted amount', Number("" + amount).toLocaleString(), 'price impact slippage', slippage)
         // adjust amount in initialQuote
         initialQuote.inAmount = "" + amount // in input atomic units
         delete initialQuote.swapUsdValue // invalidate
@@ -1357,6 +2093,7 @@ export class SolanaService extends Service {
           const txBuffer = Buffer.from(swapResponse.swapTransaction, 'base64');
           const transaction = VersionedTransaction.deserialize(txBuffer);
           transaction.sign([keypair]);
+          //transaction.sign(...keypairs); not [keypairs]
 
           // Getting recent blockhash too slow for Solana/Jupiter
           /*
@@ -1482,37 +2219,85 @@ export class SolanaService extends Service {
         //console.log('postTokenBalances', txDetails.meta.postTokenBalances)
 
         if (txDetails.meta.preTokenBalances && txDetails.meta.postTokenBalances) {
+
+          // if selling
+          let tokenCA = signal.targetTokenCA
+
+          // probably shouldn't flip it because
+          // outBal becomes the sell amount, so the labels are just wrong
+          // we only care about the targetCAamount
+          // if it's not flipped is it not found?
+          /*
+          if (signal.targetTokenCA === 'So11111111111111111111111111111111111111112') {
+            tokenCA = signal.sourceTokenCA
+          }
+          */
+
           // find only returns the first match
-          const inBal = txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey && tb.mint === signal.targetTokenCA)
-          const outBal = txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey && tb.mint === signal.targetTokenCA)
+          const inBal = txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey && tb.mint === tokenCA)
+          const outBal = txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey && tb.mint === tokenCA)
           console.log('inBal', inBal?.uiTokenAmount?.uiAmount, 'outBal', outBal?.uiTokenAmount?.uiAmount)
 
           // if selling to SOL, there won't be an account change
 
           if (outBal?.uiTokenAmount.decimals) {
-            this.decimalsCache.set(signal.targetTokenCA, outBal.uiTokenAmount.decimals)
+            this.decimalsCache.set(tokenCA, outBal.uiTokenAmount.decimals)
           }
 
-          if (inBal && outBal) {
-            const lamDiff = outBal.uiTokenAmount.uiAmount - inBal.uiTokenAmount.uiAmount
-            const diff = Number(outBal.uiTokenAmount.amount) - Number(inBal.uiTokenAmount.amount)
-            // we definitely didn't swap for nothing
-            if (diff) {
-              outAmount = diff
-              console.log('changing report to', outAmount, '(', lamDiff, ')')
+          if (signal.targetTokenCA === 'So11111111111111111111111111111111111111112') {
+            // swap to SOL
+
+            // outAmount is how much sol we're getting...
+            console.log('selling, how much sol we getting from meta', pubKey, txDetails.meta.postTokenBalances)
+            // So11111111111111111111111111111111111111112 in in amounts tbh
+            // feel like inBal/outBal is still off/wrong here...
+
+            if (inBal && outBal) {
+              // in will be high than out in this scenario?
+              const lamDiff = inBal.uiTokenAmount.uiAmount - outBal.uiTokenAmount.uiAmount
+              const diff = Number(inBal.uiTokenAmount.amount) - Number(outBal.uiTokenAmount.amount)
+              // we definitely didn't swap for nothing
+              if (diff) {
+                outAmount = diff
+                console.log('changing report to', outAmount, '(', lamDiff, ')')
+              }
+            } else if (outBal) {
+              // just means we weren't already holding the token
+              const amt = Number(outBal.uiTokenAmount.amount)
+              // we definitely didn't swap for nothing
+              if (amt) {
+                outAmount = amt
+                console.log('changing report to', outAmount)
+              }
+            } else {
+              console.log('no balances? wallet', pubKey, 'token', tokenCA)
+              //console.log('preTokenBalances', txDetails.meta.preTokenBalances, '=>', txDetails.meta.postTokenBalances)
+              console.log('wallet', txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey), '=>', txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey))
             }
-          } else if (outBal) {
-            // just means we weren't already holding the token
-            const amt = Number(outBal.uiTokenAmount.amount)
-            // we definitely didn't swap for nothing
-            if (amt) {
-              outAmount = amt
-              console.log('changing report to', outAmount)
-            }
+
+
           } else {
-            console.log('no balances? wallet', pubKey, 'token', signal.targetTokenCA)
-            //console.log('preTokenBalances', txDetails.meta.preTokenBalances, '=>', txDetails.meta.postTokenBalances)
-            console.log('wallet', txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey), '=>', txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey))
+            if (inBal && outBal) {
+              const lamDiff = outBal.uiTokenAmount.uiAmount - inBal.uiTokenAmount.uiAmount
+              const diff = Number(outBal.uiTokenAmount.amount) - Number(inBal.uiTokenAmount.amount)
+              // we definitely didn't swap for nothing
+              if (diff) {
+                outAmount = diff
+                console.log('changing report to', outAmount, '(', lamDiff, ')')
+              }
+            } else if (outBal) {
+              // just means we weren't already holding the token
+              const amt = Number(outBal.uiTokenAmount.amount)
+              // we definitely didn't swap for nothing
+              if (amt) {
+                outAmount = amt
+                console.log('changing report to', outAmount)
+              }
+            } else {
+              console.log('no balances? wallet', pubKey, 'token', tokenCA)
+              //console.log('preTokenBalances', txDetails.meta.preTokenBalances, '=>', txDetails.meta.postTokenBalances)
+              console.log('wallet', txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey), '=>', txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey))
+            }
           }
         }
 
@@ -1565,16 +2350,6 @@ export class SolanaService extends Service {
     logger.log('SolanaService start for', runtime.character.name);
 
     const solanaService = new SolanaService(runtime);
-
-    solanaService.updateInterval = setInterval(async () => {
-      logger.log('Updating wallet data');
-      await solanaService.updateWalletData();
-    }, solanaService.UPDATE_INTERVAL);
-
-    // Initial update
-    // won't matter because pubkey isn't set yet
-    //solanaService.updateWalletData().catch(console.error);
-
     return solanaService;
   }
 
