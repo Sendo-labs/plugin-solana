@@ -39,7 +39,7 @@ export const solanaEnvSchema = z
   )
   .and(
     z.object({
-      SOL_ADDRESS: z.string().min(1, 'SOL address is required'),
+      //SOL_ADDRESS: z.string().min(1, 'SOL address is required'),
       SLIPPAGE: z.string().min(1, 'Slippage is required'),
       SOLANA_RPC_URL: z.string().min(1, 'RPC URL is required'),
       //HELIUS_API_KEY: z.string().min(1, 'Helius API key is required'),
