@@ -24,16 +24,16 @@ import { z } from 'zod';
  */
 export const solanaEnvSchema = z
   .object({
-    WALLET_SECRET_SALT: z.string().optional(),
+    SOLANA_SECRET_SALT: z.string().optional(),
   })
   .and(
     z.union([
       z.object({
-        WALLET_SECRET_KEY: z.string().min(1, 'Wallet secret key is required'),
-        WALLET_PUBLIC_KEY: z.string().min(1, 'Wallet public key is required'),
+        SOLANA_PRIVATE_KEY: z.string().min(1, 'Solana secret key is required'),
+        SOLANA_PUBLIC_KEY: z.string().min(1, 'Solana public key is required'),
       }),
       z.object({
-        WALLET_SECRET_SALT: z.string().min(1, 'Wallet secret salt is required'),
+        SOLANA_SECRET_SALT: z.string().min(1, 'Solana secret salt is required'),
       }),
     ])
   )
@@ -42,8 +42,8 @@ export const solanaEnvSchema = z
       SOL_ADDRESS: z.string().min(1, 'SOL address is required'),
       SLIPPAGE: z.string().min(1, 'Slippage is required'),
       SOLANA_RPC_URL: z.string().min(1, 'RPC URL is required'),
-      HELIUS_API_KEY: z.string().min(1, 'Helius API key is required'),
-      BIRDEYE_API_KEY: z.string().min(1, 'Birdeye API key is required'),
+      //HELIUS_API_KEY: z.string().min(1, 'Helius API key is required'),
+      //BIRDEYE_API_KEY: z.string().min(1, 'Birdeye API key is required'),
     })
   );
 
@@ -63,18 +63,15 @@ export type SolanaConfig = z.infer<typeof solanaEnvSchema>;
 export async function validateSolanaConfig(runtime: IAgentRuntime): Promise<SolanaConfig> {
   try {
     const config = {
-      WALLET_SECRET_SALT:
-        runtime.getSetting('WALLET_SECRET_SALT') || process.env.WALLET_SECRET_SALT,
-      WALLET_SECRET_KEY: runtime.getSetting('WALLET_SECRET_KEY') || process.env.WALLET_SECRET_KEY,
-      WALLET_PUBLIC_KEY:
-        runtime.getSetting('SOLANA_PUBLIC_KEY') ||
-        runtime.getSetting('WALLET_PUBLIC_KEY') ||
-        process.env.WALLET_PUBLIC_KEY,
-      SOL_ADDRESS: runtime.getSetting('SOL_ADDRESS') || process.env.SOL_ADDRESS,
-      SLIPPAGE: runtime.getSetting('SLIPPAGE') || process.env.SLIPPAGE,
-      SOLANA_RPC_URL: runtime.getSetting('SOLANA_RPC_URL') || process.env.SOLANA_RPC_URL,
-      HELIUS_API_KEY: runtime.getSetting('HELIUS_API_KEY') || process.env.HELIUS_API_KEY,
-      BIRDEYE_API_KEY: runtime.getSetting('BIRDEYE_API_KEY') || process.env.BIRDEYE_API_KEY,
+      SOLANA_SECRET_SALT: runtime.getSetting('SOLANA_SECRET_SALT'),// wtf is this?
+      //SOL_ADDRESS: runtime.getSetting('SOL_ADDRESS'),
+      SLIPPAGE: runtime.getSetting('SLIPPAGE'),
+      SOLANA_RPC_URL: runtime.getSetting('SOLANA_RPC_URL'),
+      //HELIUS_API_KEY: runtime.getSetting('HELIUS_API_KEY'),
+      //BIRDEYE_API_KEY: runtime.getSetting('BIRDEYE_API_KEY'),
+      // optional:
+      SOLANA_PRIVATE_KEY: runtime.getSetting('SOLANA_PRIVATE_KEY'),
+      SOLANA_PUBLIC_KEY: runtime.getSetting('SOLANA_PUBLIC_KEY')
     };
 
     return solanaEnvSchema.parse(config);
