@@ -36,7 +36,7 @@ export const solanaPlugin: Plugin = {
     runtime.registerProvider(walletProvider)
 
     // extensions
-    const p = runtime.getServiceLoadPromise('INTEL_CHAIN').then( () => {
+    runtime.getServiceLoadPromise('INTEL_CHAIN').then( () => {
       //runtime.logger.log('solana INTEL_CHAIN LOADED')
       const traderChainService = runtime.getService('INTEL_CHAIN') as any;
       const me = {
