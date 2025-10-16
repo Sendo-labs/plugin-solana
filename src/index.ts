@@ -1,4 +1,4 @@
-import type { IAgentRuntime, Plugin } from '@elizaos/core';
+import type { IAgentRuntime, Plugin, ServiceTypeName } from '@elizaos/core';
 import { parseBooleanFromText } from '@elizaos/core';
 
 // actions
@@ -36,7 +36,7 @@ export const solanaPlugin: Plugin = {
     runtime.registerProvider(walletProvider)
 
     // extensions
-    runtime.getServiceLoadPromise('INTEL_CHAIN').then( () => {
+    runtime.getServiceLoadPromise('INTEL_CHAIN' as ServiceTypeName).then( () => {
       //runtime.logger.log('solana INTEL_CHAIN LOADED')
       const traderChainService = runtime.getService('INTEL_CHAIN') as any;
       const me = {
