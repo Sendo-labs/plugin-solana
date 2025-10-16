@@ -1593,7 +1593,7 @@ export class SolanaService extends Service {
       }
       console.log('getTokenAccountsByKeypair - getParsedTokenAccountsByOwner', walletAddress.toString())
 
-      const [accounts: any, token2022s: any] = await Promise.all([
+      const [accounts, token2022s]: [any, any] = await Promise.all([
         this.connection.getParsedTokenAccountsByOwner(walletAddress, {
           programId: TOKEN_PROGRAM_ID, // original SPL
         }),
