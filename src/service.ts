@@ -4,12 +4,9 @@ import {
   Keypair,
   PublicKey,
   VersionedTransaction,
-  VersionedMessage,
-  Transaction,
-  TransactionMessage,
-  TransactionInstruction,
   SendTransactionError,
-  LAMPORTS_PER_SOL
+  LAMPORTS_PER_SOL,
+  AccountInfo
 } from '@solana/web3.js';
 import {
   MintLayout, getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, unpackAccount,
@@ -106,15 +103,23 @@ export class SolanaService extends Service {
     const serviceType = 'JUPITER_SERVICE'
 
     const getJup = async () => {
+      const maxRetries = 10;
+      let retries = 0;
+
       this.jupiterService = this.runtime.getService(serviceType) as any;
-      while (!this.jupiterService) {
-        runtime.logger.debug(asking, 'waiting for', serviceType, 'service...');
+      while (!this.jupiterService && retries < maxRetries) {
+        runtime.logger.debug(`${asking} waiting for ${serviceType} service... (${retries + 1}/${maxRetries})`);
         this.jupiterService = this.runtime.getService(serviceType) as any;
         if (!this.jupiterService) {
           await new Promise((waitResolve) => setTimeout(waitResolve, 1000));
+          retries++;
         } else {
-          runtime.logger.debug(asking, 'Acquired', serviceType, 'service...');
+          runtime.logger.debug(`${asking} Acquired ${serviceType} service...`);
         }
+      }
+
+      if (!this.jupiterService) {
+        runtime.logger.info(`${asking} - JUPITER_SERVICE not available (swap functionality will be limited)`);
       }
     }
     getJup() // no wait
@@ -138,7 +143,7 @@ export class SolanaService extends Service {
         });
       })
       .catch((error) => {
-        logger.error('Error initializing public key:', error);
+        logger.error(`Error initializing public key: ${error}`);
       });
     this.subscriptions = new Map();
   }
@@ -159,7 +164,7 @@ export class SolanaService extends Service {
    */
   async registerExchange(provider: any) {
     const id = Object.values(this.exchangeRegistry).length + 1;
-    logger.log('Registered', provider.name, 'as Solana provider #' + id);
+    logger.log(`Registered ${provider.name} as Solana provider #${id}`);
     this.exchangeRegistry[id] = provider;
     return id;
   }
@@ -167,15 +172,15 @@ export class SolanaService extends Service {
   /**
    * Fetches data from the provided URL with retry logic.
    * @param {string} url - The URL to fetch data from.
-   * @param {RequestInit} [options={}] - The options for the fetch request.
+   * @param {Record<string, any>} [options={}] - The options for the fetch request.
    * @returns {Promise<unknown>} - A promise that resolves to the fetched data.
    */
-  private async birdeyeFetchWithRetry(url: string, options: RequestInit = {}): Promise<unknown> {
-    let lastError: Error;
+  private async birdeyeFetchWithRetry(url: string, options: Record<string, any> = {}): Promise<unknown> {
+    let lastError: Error | undefined;
 
     for (let i = 0; i < PROVIDER_CONFIG.MAX_RETRIES; i++) {
       try {
-        const response = await fetch(url, {
+        const response = await (globalThis as any).fetch(url, {
           ...options,
           headers: {
             Accept: 'application/json',
@@ -192,7 +197,7 @@ export class SolanaService extends Service {
 
         return await response.json();
       } catch (error) {
-        logger.error(`Attempt ${i + 1} failed:`, error);
+        logger.error(`Attempt ${i + 1} failed: ${error}`);
         lastError = error as Error;
         if (i < PROVIDER_CONFIG.MAX_RETRIES - 1) {
           await new Promise((resolve) => setTimeout(resolve, PROVIDER_CONFIG.RETRY_DELAY * 2 ** i));
@@ -220,8 +225,8 @@ export class SolanaService extends Service {
   }: {
     message: string; signatureBase64: string; publicKeyBase58: string;
   }): boolean {
-    const signature = Buffer.from(signatureBase64, "base64");
-    const messageUint8 = new TextEncoder().encode(message);
+    const signature = Uint8Array.from(Buffer.from(signatureBase64, "base64"));
+    const messageUint8 = Uint8Array.from(Buffer.from(message, 'utf-8'));
     const publicKeyBytes = bs58.decode(publicKeyBase58);
 
     return nacl.sign.detached.verify(messageUint8, signature, publicKeyBytes);
@@ -262,7 +267,7 @@ export class SolanaService extends Service {
       //logger.log(`Solana address validation: ${address}`, { isValid });
       return isValid;
     } catch (error) {
-      logger.error(`Address validation error: ${address}`, { error });
+      logger.error(`Address validation error: ${address} - ${error}`);
       return false;
     }
   }
@@ -435,7 +440,7 @@ export class SolanaService extends Service {
     // 2. Sum balances
     let circulating = 0;
     for (const acc of accounts) {
-      const info = acc.account.data.parsed.info;
+      const info = (acc.account.data as any).parsed.info;
       const owner = info.owner;
 
       // Optional: exclude burn address or known treasury/mint holding
@@ -477,7 +482,7 @@ export class SolanaService extends Service {
     for (const token of tokens) {
       const response = await this.birdeyeFetchWithRetry(
         `${PROVIDER_CONFIG.BIRDEYE_API}/defi/price?address=${token}`
-      );
+      ) as any;
 
       if (response?.data?.value) {
         const price = response.data.value.toString();
@@ -519,11 +524,11 @@ export class SolanaService extends Service {
         this.decimalsCache.set(key, mintInfo.decimals);
         return mintInfo.decimals;
       }
-      console.error('Unknown owner type', owner, acc)
+      console.error(`Unknown owner type ${owner}`, acc)
       return -1
     } catch (error) {
       // this will fail on a token2022 token
-      console.error('Failed to fetch token decimals:', error);
+      console.error(`Failed to fetch token decimals: ${error}`);
       //throw error;
       return -1;
     }
@@ -615,10 +620,9 @@ export class SolanaService extends Service {
 
     return out;
   }
-
-  public async getSupply(CAs) {
-    //console.log('getSupply CAs', CAs.length)
-    const mintKeys: PublicKey[] = CAs.map(ca => new PublicKey(ca));
+    
+  public async getSupply(CAs: string[]) {
+    const mintKeys: PublicKey[] = CAs.map((ca: string) => new PublicKey(ca));    
     const mintInfos = await this.batchGetMultipleAccountsInfo(mintKeys, 'getSupply')
 
     const results = mintInfos.map((accountInfo, idx) => {
@@ -626,7 +630,7 @@ export class SolanaService extends Service {
         return { address: CAs[idx], error: 'Account not found' };
       }
 
-      const data = Buffer.from(accountInfo.data);
+      const data = Uint8Array.from(Buffer.from(accountInfo.data));
       const mint = MintLayout.decode(data);
       // mintAuthority, supply, decimals, isInitialized, freezeAuthorityOption, freezeAuthority
       //console.log('mint', mint)
@@ -655,7 +659,7 @@ export class SolanaService extends Service {
     return out
   }
 
-  public async parseTokenAccounts(heldTokens, options = {}) {
+  public async parseTokenAccounts(heldTokens: any [], options = {}) {
     // decimalsCache means we don't need all I think
     // we need structure token cache
     // stil need them for symbol
@@ -751,9 +755,9 @@ export class SolanaService extends Service {
 
     // we might want to get all keys here so we can get the supply
     const allMintKeys: PublicKey[] = Array.from(new Set(
-      fetchTokens.map(t => t.account.data.parsed.info.mint as string)
+      fetchTokens.map((t: any) => t.account.data.parsed.info.mint as string)
     )).map(s => new PublicKey(s))
-
+    
     //
     const mintInfos = await this.batchGetMultipleAccountsInfo(allMintKeys, "t22-mints")
 
@@ -997,7 +1001,7 @@ export class SolanaService extends Service {
 
     //console.log('mpMintKeys', mpMintKeys.length)
 
-    const mpAddrs = await Promise.all(mpMintKeys.map(m => this.getMetadataAddress(m)));
+    const mpAddrs: PublicKey[] = await Promise.all(mpMintKeys.map(m => this.getMetadataAddress(m)));
     const mpInfos = mpAddrs.length
       ? await this.batchGetMultipleAccountsInfo(mpAddrs, "metaplex-md")
       : [];
@@ -1158,7 +1162,7 @@ export class SolanaService extends Service {
     //console.log('accountInfos', accountInfos) // works
 
     /*
-    const results = heldTokens.map((token, i) => {
+    const results = heldTokens.map((token: any, i: number) => {
       const metadataInfo = accountInfos[i];      // raw AccountInfo | null
       //console.log('metadataInfo', metadataInfo)
       const mintKey      = mintKeys[i];
@@ -1292,7 +1296,7 @@ export class SolanaService extends Service {
     })().catch(err => console.error('solana:parseTokenAccounts - cache save failed:', err))
 
     // then convert array to keyed object
-    const out = Object.fromEntries(results.map(r => [r.mint, {
+    const out = Object.fromEntries(results.map((r: any) => [r.mint, {
       symbol: r.symbol,
       supply: r.supply,
       tokenProgram: r.tokenProgram,
@@ -1366,7 +1370,7 @@ export class SolanaService extends Service {
         // maybe we just get the pubkey here proper
         // or fall back to SOLANA_PUBLIC_KEY
         logger.log('solana::updateWalletData - no Public Key yet');
-        return {};
+        return { totalUsd: '0', items: [] };
       }
 
       //console.log('updateWalletData - force', force, 'last', this.lastUpdate, 'UPDATE_INTERVAL', this.UPDATE_INTERVAL)
@@ -1384,7 +1388,7 @@ export class SolanaService extends Service {
           try {
             const walletData = await this.birdeyeFetchWithRetry(
               `${PROVIDER_CONFIG.BIRDEYE_API}/v1/wallet/token_list?wallet=${this.publicKey.toBase58()}`
-            );
+            ) as any;
             // only good for checking envelope
             //console.log('walletData', walletData)
 
@@ -1442,22 +1446,44 @@ export class SolanaService extends Service {
           }
         }
 
-        // Fallback to basic token account info
+        // Fallback to basic token account info (without Birdeye)
+        logger.log('Using RPC fallback for wallet data (no Birdeye)');
         const accounts = await this.getTokenAccounts();
-        accounts.forEach((acc) => {
-          this.decimalsCache.set(acc.account.data.parsed.info.mint, acc.account.data.parsed.info.tokenAmount.decimals);
+        if (!accounts || accounts.length === 0) {
+          logger.log('No token accounts found');
+          const emptyPortfolio: WalletPortfolio = {
+            totalUsd: '0',
+            totalSol: '0',
+            items: [],
+          };
+          await this.runtime.setCache<WalletPortfolio>(SOLANA_WALLET_DATA_CACHE_KEY, emptyPortfolio);
+          this.lastUpdate = now;
+          return emptyPortfolio;
+        }
+
+        // Get token metadata (symbols) using parseTokenAccounts
+        const tokenMetadata = await this.parseTokenAccounts(accounts);
+
+        const items: Item[] = accounts.map((acc: any) => {
+          const mint = acc.account.data.parsed.info.mint;
+          const metadata = tokenMetadata[mint];
+
+          this.decimalsCache.set(mint, acc.account.data.parsed.info.tokenAmount.decimals);
+
+          return {
+            name: metadata?.symbol || 'Unknown',
+            address: mint,
+            symbol: metadata?.symbol || 'Unknown',
+            decimals: acc.account.data.parsed.info.tokenAmount.decimals,
+            balance: acc.account.data.parsed.info.tokenAmount.amount,
+            uiAmount: acc.account.data.parsed.info.tokenAmount.uiAmount.toString(),
+            priceUsd: '0',
+            valueUsd: '0',
+            valueSol: '0',
+          };
         });
-        const items: Item[] = accounts.map((acc) => ({
-          name: 'Unknown',
-          address: acc.account.data.parsed.info.mint,
-          symbol: 'Unknown',
-          decimals: acc.account.data.parsed.info.tokenAmount.decimals,
-          balance: acc.account.data.parsed.info.tokenAmount.amount,
-          uiAmount: acc.account.data.parsed.info.tokenAmount.uiAmount.toString(),
-          priceUsd: '0',
-          valueUsd: '0',
-          valueSol: '0',
-        }));
+
+        logger.log(`Fallback mode: Found ${items.length} tokens in wallet`);
 
         const portfolio: WalletPortfolio = {
           totalUsd: '0',
@@ -1469,7 +1495,7 @@ export class SolanaService extends Service {
         this.lastUpdate = now;
         return portfolio;
       } catch (error) {
-        logger.error('Error updating wallet data:', error);
+        logger.error(`Error updating wallet data: ${error}`);
         throw error;
       }
     }
@@ -1528,7 +1554,7 @@ export class SolanaService extends Service {
           privateKey,
         };
       } catch (error) {
-        logger.error('Error creating wallet:', error);
+        logger.error(`Error creating wallet: ${error}`);
         throw new Error('Failed to create new wallet');
       }
     }
@@ -1550,23 +1576,24 @@ export class SolanaService extends Service {
       const now = Date.now()
       let check = false
       // default is undefined, which will run thecheck
-      if (options.notOlderThan !== 0) {
+      if ((options as any).notOlderThan !== 0) {
         check = await this.runtime.getCache<any>(key)
         if (check) {
           // how old is this data, do we care
-          const diff = now - check.fetchedAt
+          const diff = now - (check as any).fetchedAt
           // 1s - 5min cache?
           // FIXME: options driven...
           const acceptableInMs = options.notOlderThan ?? 60_000 // default
           if (diff < acceptableInMs) {
             console.log('getTokenAccountsByKeypair cache HIT, its', diff.toLocaleString() + 'ms old')
-            return check.data
+            return (check as any).data
           }
           console.log('getTokenAccountsByKeypair cache MISS, its', diff.toLocaleString() + 'ms old')
         }
       }
       console.log('getTokenAccountsByKeypair - getParsedTokenAccountsByOwner', walletAddress.toString())
-      const [accounts, token2022s] = await Promise.all([
+
+      const [accounts, token2022s]: [any, any] = await Promise.all([
         this.connection.getParsedTokenAccountsByOwner(walletAddress, {
           programId: TOKEN_PROGRAM_ID, // original SPL
         }),
@@ -1603,7 +1630,7 @@ export class SolanaService extends Service {
       })
       return haveAllTokens
     } catch (error) {
-      logger.error('Error fetching token accounts:', error);
+      logger.error(`Error fetching token accounts: ${error}`);
       return [];
     }
   }
@@ -1624,7 +1651,7 @@ export class SolanaService extends Service {
   */
 
   // only get SOL balance
-  public async getBalancesByAddrs(walletAddressArr: string[]) {
+  public async getBalancesByAddrs(walletAddressArr: string[]): Promise<Record<string, number>> {
     try {
       //console.log('walletAddressArr', walletAddressArr)
       const publicKeyObjs = walletAddressArr.map(k => new PublicKey(k));
@@ -1649,7 +1676,7 @@ export class SolanaService extends Service {
       }
       return out
     } catch (error) {
-      const msg = error.message || '';
+      const msg = (error as any).message || '';
       if (msg.includes('429')) {
         this.runtime.logger.warn('RPC rate limit hit, pausing before retry');
         // FIXME: retry counter, exponential backoff
@@ -1657,8 +1684,8 @@ export class SolanaService extends Service {
         return this.getBalancesByAddrs(walletAddressArr)
       }
       //this.runtime.logger.error('solSrv:getBalancesByAddrs - Error fetching wallet balances:', error);
-      this.runtime.logger.error('solSrv:getBalancesByAddrs - unexpected error:', error);
-      return -1;
+      this.runtime.logger.error(`solSrv:getBalancesByAddrs - unexpected error: ${error}`);
+      return {};
     }
   }
 
@@ -1749,7 +1776,7 @@ export class SolanaService extends Service {
    * @returns {Promise<number>} Subscription ID
    */
   // needs to take a handler...
-  public async subscribeToAccount(accountAddress: string, handler): Promise<number> {
+  public async subscribeToAccount(accountAddress: string, handler: any): Promise<number> {
     try {
       if (!this.validateAddress(accountAddress)) {
         throw new Error('Invalid account address');
@@ -1762,7 +1789,7 @@ export class SolanaService extends Service {
 
       /*
       // Create WebSocket connection if needed
-      const ws = this.connection.connection._rpcWebSocket;
+      const ws = (this.connection as any).connection._rpcWebSocket;
 
       const subscriptionId = await ws.call('accountSubscribe', [
         accountAddress,
@@ -1801,7 +1828,7 @@ export class SolanaService extends Service {
       logger.log(`Subscribed to account ${accountAddress} with ID ${subscriptionId}`);
       return subscriptionId;
     } catch (error) {
-      logger.error('Error subscribing to account:', error);
+      logger.error(`Error subscribing to account: ${error}`);
       throw error;
     }
   }
@@ -1822,7 +1849,7 @@ export class SolanaService extends Service {
       //await connection.removeAccountChangeListener(subscriptionId);
 
       /*
-      const ws = this.connection.connection._rpcWebSocket;
+      const ws = (this.connection as any).connection._rpcWebSocket;
       const success = await ws.call('accountUnsubscribe', [subscriptionId]);
 
       if (success) {
@@ -1834,7 +1861,7 @@ export class SolanaService extends Service {
       */
       //
     } catch (error) {
-      logger.error('Error unsubscribing from account:', error);
+      logger.error(`Error unsubscribing from account: ${error}`);
       throw error;
     }
   }
@@ -1882,7 +1909,7 @@ export class SolanaService extends Service {
 
       return { amount: optimalAmount, slippage };
     } catch (error) {
-      logger.error('Error calculating optimal buy amount:', error);
+      logger.error(`Error calculating optimal buy amount: ${error}`);
       throw error;
     }
   }
@@ -1914,7 +1941,7 @@ export class SolanaService extends Service {
       //console.log('calculateOptimalBuyAmount - optimal slippage', slippage)
       return { amount: optimalAmount, slippage: recommendedSlippage };
     } catch (error) {
-      logger.error('calculateOptimalBuyAmount2 - Error calculating optimal buy amount:', error);
+      logger.error(`calculateOptimalBuyAmount2 - Error calculating optimal buy amount: ${error}`);
       throw error;
     }
   }
@@ -1933,10 +1960,10 @@ export class SolanaService extends Service {
       try {
 
         // validate amount
-        const intAmount: number = parseInt(wallet.amount)
+        const intAmount: number = parseInt(wallet.amount.toString())
         if (isNaN(intAmount) || intAmount <= 0) {
-          console.warn('solana::executeSwap - Amount in', wallet.amount, 'become', intAmount)
-          swapResponses[pubKey] = {
+          console.warn(`solana::executeSwap - Amount in ${wallet.amount} become ${intAmount}`);
+          (swapResponses as any)[pubKey] = {
             success: false,
             error: 'bad amount'
           };
@@ -1958,8 +1985,8 @@ export class SolanaService extends Service {
         //console.log('baseLamports', baseLamports.toLocaleString(), 'weHave', ourLamports.toLocaleString())
         // avoid wasting jupiter quote rate limit
         if (baseLamports > ourLamports) {
-          console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low to swap', 'baseLamports', baseLamports.toLocaleString(), 'weHave', ourLamports.toLocaleString())
-          swapResponses[pubKey] = {
+          console.log(`executeSwap - wallet ${wallet.keypair.publicKey} SOL is too low to swap baseLamports ${baseLamports.toLocaleString()} weHave ${ourLamports.toLocaleString()}`);
+          (swapResponses as any)[pubKey] = {
             success: false,
             error: 'not enough SOL'
           };
@@ -2000,9 +2027,9 @@ export class SolanaService extends Service {
         //console.log('availableLamports', availableLamports.toLocaleString())
         if (initialQuote.totalLamportsNeeded > availableLamports) {
           // we can't afford as is
-          console.log('executeSwap - wallet', wallet.keypair.publicKey, 'SOL is too low, has', availableLamports.toLocaleString(), 'needs', initialQuote.totalLamportsNeeded.toLocaleString())
+          console.log(`executeSwap - wallet ${wallet.keypair.publicKey} SOL is too low, has ${availableLamports.toLocaleString()} needs ${initialQuote.totalLamportsNeeded.toLocaleString()}`);
           // lets make sure
-          swapResponses[pubKey] = {
+          (swapResponses as any)[pubKey] = {
             success: false,
             error: 'not enough SOL'
           };
@@ -2073,25 +2100,25 @@ export class SolanaService extends Service {
 
         // Execute the swap
         let swapResponse
-        const executeSwap = async (impliedSlippageBps) => {
+        const executeSwap = async (impliedSlippageBps: number) => {
           console.log('executingSwap', pubKey, signal.sourceTokenCA, signal.targetTokenCA, 'with', impliedSlippageBps + 'bps slippage')
           // convert quote into instructions
           swapResponse = await this.jupiterService.executeSwap({
             quoteResponse: initialQuote,
             userPublicKey: pubKey,
-            slippageBps: parseInt(impliedSlippageBps),
+            slippageBps: parseInt(impliedSlippageBps.toString()),
           });
           //console.log('swapResponse', swapResponse)
           //console.log('keypair', wallet.keypair)
 
-          const secretKey = bs58.decode(wallet.keypair.privateKey);
+          const secretKey = bs58.decode(wallet.keypair.privateKey as string);
           const keypair = Keypair.fromSecretKey(secretKey);
           //const signature = await this.executeSwap(keypair, swapResponse)
           //console.log('keypair', keypair)
 
           // Deserialize, sign, and send
-          const txBuffer = Buffer.from(swapResponse.swapTransaction, 'base64');
-          const transaction = VersionedTransaction.deserialize(txBuffer);
+          const txBuffer = Buffer.from(swapResponse.swapTransaction as string, 'base64');
+          const transaction = VersionedTransaction.deserialize(Uint8Array.from(txBuffer));
           transaction.sign([keypair]);
           //transaction.sign(...keypairs); not [keypairs]
 
@@ -2131,7 +2158,7 @@ export class SolanaService extends Service {
 
               if (logs) {
                 if (logs.some(l => l.includes('custom program error: 0x1771'))) {
-                  console.log('Swap failed: slippage tolerance exceeded.', parseInt(impliedSlippageBps));
+                  console.log(`Swap failed: slippage tolerance exceeded. ${impliedSlippageBps}`);
                   // handle slippage
                   // 🎯 You could retry with higher slippage or log for the user
 
@@ -2218,7 +2245,7 @@ export class SolanaService extends Service {
         console.log('going to report', initialQuote.outAmount)
         //console.log('postTokenBalances', txDetails.meta.postTokenBalances)
 
-        if (txDetails.meta.preTokenBalances && txDetails.meta.postTokenBalances) {
+        if (txDetails?.meta?.preTokenBalances && txDetails?.meta?.postTokenBalances) {
 
           // if selling
           let tokenCA = signal.targetTokenCA
@@ -2254,7 +2281,9 @@ export class SolanaService extends Service {
 
             if (inBal && outBal) {
               // in will be high than out in this scenario?
+              //const lamDiff = (outBal.uiTokenAmount?.uiAmount || 0) - (inBal.uiTokenAmount?.uiAmount || 0)
               const lamDiff = inBal.uiTokenAmount.uiAmount - outBal.uiTokenAmount.uiAmount
+              //const diff = Number(outBal.uiTokenAmount?.amount || 0) - Number(inBal.uiTokenAmount?.amount || 0)
               const diff = Number(inBal.uiTokenAmount.amount) - Number(outBal.uiTokenAmount.amount)
               // we definitely didn't swap for nothing
               if (diff) {
@@ -2296,13 +2325,13 @@ export class SolanaService extends Service {
             } else {
               console.log('no balances? wallet', pubKey, 'token', tokenCA)
               //console.log('preTokenBalances', txDetails.meta.preTokenBalances, '=>', txDetails.meta.postTokenBalances)
-              console.log('wallet', txDetails.meta.preTokenBalances.find(tb => tb.owner === pubKey), '=>', txDetails.meta.postTokenBalances.find(tb => tb.owner === pubKey))
+              console.log('wallet', txDetails?.meta?.preTokenBalances?.find(tb => tb.owner === pubKey), '=>', txDetails?.meta?.postTokenBalances?.find(tb => tb.owner === pubKey))
             }
           }
         }
 
-        const fee = txDetails.meta.fee;
-        console.log(`Transaction fee: ${fee.toLocaleString()} lamports`);
+        const fee = txDetails?.meta?.fee;
+        console.log(`Transaction fee: ${fee?.toLocaleString()} lamports`);
         const fees = {
           /*
           quote: {
@@ -2311,8 +2340,8 @@ export class SolanaService extends Service {
           },
           */
           lamports: fee,
-          sol: fee * SolanaService.LAMPORTS2SOL
-        }
+          sol: fee ? fee * SolanaService.LAMPORTS2SOL : 0
+        };
 
         /*
         // Calculate final amounts including fees
@@ -2323,7 +2352,7 @@ export class SolanaService extends Service {
         });
         */
 
-        swapResponses[pubKey] = {
+        (swapResponses as any)[pubKey] = {
           success: true,
           outAmount,
           outDecimal: await this.getDecimal(signal.targetTokenCA),
@@ -2332,8 +2361,8 @@ export class SolanaService extends Service {
           swapResponse,
         };
       } catch (error) {
-        logger.error('Error in swap execution:', error);
-        swapResponses[pubKey] = { success: false };
+        logger.error(`Error in swap execution: ${error}`);
+        (swapResponses as any)[pubKey] = { success: false };
       }
     }
 
@@ -2347,7 +2376,7 @@ export class SolanaService extends Service {
    * @returns {Promise<SolanaService>} The initialized Solana service.
    */
   static async start(runtime: IAgentRuntime): Promise<SolanaService> {
-    logger.log('SolanaService start for', runtime.character.name);
+    logger.log(`SolanaService start for ${runtime.character.name}`);
 
     const solanaService = new SolanaService(runtime);
     return solanaService;
