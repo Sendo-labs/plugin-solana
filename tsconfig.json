@@ -11,6 +11,7 @@
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
     "declaration": true,
+    "declarationDir": "dist",
     "emitDeclarationOnly": true,
     "resolveJsonModule": true,
     "moduleDetection": "force",
@@ -20,5 +21,6 @@
       "@elizaos/core/*": ["../core/src/*"]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
 }
