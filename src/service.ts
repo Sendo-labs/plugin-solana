@@ -1,4 +1,5 @@
-import { type IAgentRuntime, ServiceTypeName, Service, logger } from '@elizaos/core';
+import { type IAgentRuntime, ServiceTypeName, Service, ServiceType, logger } from '@elizaos/core';
+import { IWalletService, WalletPortfolio as siWalletPortfolio } from '@elizaos/service-interfaces';
 import {
   Connection,
   Keypair,
@@ -59,14 +60,47 @@ async function setCacheExp(runtime: IAgentRuntime, key: string, val: any, ttlInS
   });
 }
 
+export interface ISolanaPluginServiceAPI extends Service {
+  executeSwap: (
+    wallets: Array<{ keypair: any; amount: number }>, signal: any
+  ) => Promise<Record<string, unknown>>;
+  /*
+  executeSwap: (params: {
+    inputMint: string;
+    outputMint: string;
+    amount: string; // Amount in base units of input token
+    slippageBps: number;
+    payerAddress: string; // Public key of the payer (must match service's configured wallet)
+    priorityFeeMicroLamports?: number;
+  }) => Promise<{
+    success: boolean;
+    signature?: string;
+    error?: string;
+    outAmount?: string;
+    inAmount?: string;
+    swapUsdValue?: string;
+  }>;
+  */
+  //getSolBalance: (publicKey: string) => Promise<number>; // Returns SOL balance (not lamports)
+  /*
+  getTokenBalance: (
+    publicKey: string,
+    mintAddress: string
+  ) => Promise<{ amount: string; decimals: number; uiAmount: number } | null>;
+  */
+  getPublicKey: () => PublicKey | null; // Returns base58 public key
+}
+
 /**
  * Service class for interacting with the Solana blockchain and accessing wallet data.
  * @extends Service
  */
-export class SolanaService extends Service {
-  static serviceType: string = SOLANA_SERVICE_NAME;
-  capabilityDescription =
-    'The agent is able to interact with the Solana blockchain, and has access to the wallet data';
+export class SolanaService extends IWalletService implements ISolanaPluginServiceAPI {
+  readonly serviceName = SOLANA_SERVICE_NAME;
+  //static override readonly serviceType = ServiceType.WALLET;
+  //static serviceType: string = SOLANA_SERVICE_NAME;
+  public readonly capabilityDescription =
+    ('The agent is able to interact with the Solana blockchain, and has access to the wallet data' as unknown as typeof IWalletService.prototype.capabilityDescription);
 
   private lastUpdate = 0;
   private readonly UPDATE_INTERVAL = 2 * 60_000; // 2 minutes
@@ -93,8 +127,9 @@ export class SolanaService extends Service {
    * Constructor for creating an instance of the class.
    * @param {IAgentRuntime} runtime - The runtime object that provides access to agent-specific functionality.
    */
-  constructor(protected runtime: IAgentRuntime) {
-    super();
+  constructor(runtime?: IAgentRuntime) {
+    if (!runtime) throw new Error('runtime is required for solana service')
+    super(runtime);
     this.exchangeRegistry = {};
     const connection = new Connection(
       runtime.getSetting('SOLANA_RPC_URL') || PROVIDER_CONFIG.DEFAULT_RPC
@@ -132,6 +167,64 @@ export class SolanaService extends Service {
       });
     this.subscriptions = new Map();
   }
+
+  //
+  // MARK: IWalletService
+  //
+
+  /**
+   * Retrieves the entire portfolio of assets held by the wallet.
+   * @param owner - Optional: The specific wallet address/owner to query.
+   * @returns A promise that resolves to the wallet's portfolio.
+   */
+  public async getPortfolio(owner?: string): Promise<siWalletPortfolio> {
+    if (owner && owner !== this.publicKey?.toBase58()) {
+      throw new Error(
+        `This SolanaService instance can only get the portfolio for its configured wallet: ${this.publicKey?.toBase58()}`
+      );
+    }
+    const wp: WalletPortfolio = await this.updateWalletData(true)
+    const out: siWalletPortfolio = {
+      totalValueUsd: parseFloat(wp.totalUsd),
+      assets: []
+    }
+    return out;
+  }
+
+  /**
+   * Retrieves the balance of a specific asset in the wallet.
+   * @param assetAddress - The mint address or native identifier ('SOL') of the asset.
+   * @param owner - Optional: The specific wallet address/owner to query.
+   * @returns A promise that resolves to the user-friendly (decimal-adjusted) balance of the asset held.
+   */
+  public async getBalance(assetAddress: string, owner?: string): Promise<number> {
+    const ownerAddress: string | undefined = owner || (await this.getPublicKey()?.toBase58());
+    if (!ownerAddress) {
+      return -1
+    }
+    if (
+      assetAddress.toUpperCase() === 'SOL' ||
+      assetAddress === PROVIDER_CONFIG.TOKEN_ADDRESSES.SOL
+    ) {
+      //return this.getSolBalance(ownerAddress);
+      const balances = await this.getBalancesByAddrs([ownerAddress])
+      const balance = balances[ownerAddress]
+      return balance
+    }
+    //const tokenBalance = await this.getTokenBalance(ownerAddress, assetAddress);
+    //return tokenBalance?.uiAmount || 0;
+    const tokenBalances: any = await this.getTokenAccountsByKeypairs([ownerAddress])
+    const balance: number = tokenBalances[ownerAddress]?.balanceUi || 0
+    return balance
+  }
+
+  async transferSol(from: any, to: any, lamports: number): Promise<string> {
+    return ''
+  }
+
+  //
+  // MARK: End IWalletService
+  //
 
   /**
    * Retrieves the connection object.
@@ -755,21 +848,26 @@ export class SolanaService extends Service {
         return { address: CAs[idx], error: 'Account not found' };
       }
 
-      const data = Uint8Array.from(Buffer.from(accountInfo.data));
-      const mint = MintLayout.decode(data);
-      // mintAuthority, supply, decimals, isInitialized, freezeAuthorityOption, freezeAuthority
-      //console.log('mint', mint)
+      // accountInfo.data is a Node Buffer; make a Uint8Array *view* (no copy)
+      const buf = accountInfo.data as Buffer;
+      const u8 = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 
-      // Convert Buffer (little endian) to BigNumber
-      const supply = mint.supply;
-      const decimals = mint.decimals;
+      // MintLayout.decode accepts Uint8Array (and Buffer). Use u8 to avoid type fuss.
+      const mint = MintLayout.decode(u8);
+
+      // Normalize types
+      const decimals: number = mint.decimals;
+      const supply: bigint = BigInt(mint.supply.toString()); // ensure bigint
+
+      // bigint-safe 10^decimals
+      let denom = 1n;
+      for (let i = 0; i < decimals; i++) denom *= 10n;
 
       return {
         address: CAs[idx],
-        biSupply: supply,  // or divide by 10**decimals if you want human-readable
-        // BigNumber is good for price for MCAP
-        human: new BigNumber((supply / BigInt(10 ** decimals)).toString()),
-        // maybe it should be a string... and they w/e use can cast it as such
+        biSupply: supply, // keep as bigint for exactness
+        // Human-readable (use BigNumber to avoid float issues for large values)
+        human: new BigNumber(supply.toString()).dividedBy(10 ** decimals),
         decimals,
       };
     });
@@ -1066,8 +1164,11 @@ export class SolanaService extends Service {
         }
       } else {
         // spl token
-        const data = info?.data;
-        const header = data.subarray(0, MintLayout.span);
+        const buf = info!.data as Buffer;
+        const u8  = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+
+        // slice the header as a Uint8Array, not Buffer
+        const header = u8.subarray(0, MintLayout.span);
         const mintData = MintLayout.decode(header);
         //console.log('spl mintData', mintData)
         const uiSupply = formatSupplyUiAmount(mintData.supply, mintData.decimals)
@@ -2070,7 +2171,7 @@ export class SolanaService extends Service {
    * @param {any} signal - Trading signal information
    * @returns {Promise<Array<{ success: boolean; outAmount?: number; fees?: any; swapResponse?: any }>>}
    */
-  public async executeSwap(wallets: Array<{ keypair: any; amount: number }>, signal: any) {
+  public async executeSwap(wallets: Array<{ keypair: any; amount: number }>, signal: any): Promise<Record<string, unknown>> {
     // do it in serial to avoid hitting rate limits
     const swapResponses = {}
     for(const wallet of wallets) {
@@ -2491,7 +2592,7 @@ export class SolanaService extends Service {
    * @param {IAgentRuntime} runtime - The agent runtime to use for the Solana service.
    * @returns {Promise<SolanaService>} The initialized Solana service.
    */
-  static async start(runtime: IAgentRuntime): Promise<SolanaService> {
+  static async start(runtime: IAgentRuntime): Promise<Service> {
     logger.log(`SolanaService start for ${runtime.character.name}`);
 
     const solanaService = new SolanaService(runtime);
@@ -2504,7 +2605,7 @@ export class SolanaService extends Service {
    * @param {IAgentRuntime} runtime - The agent runtime.
    * @returns {Promise<void>} - A promise that resolves once the Solana service has stopped.
    */
-  static async stop(runtime: IAgentRuntime) {
+  static async stop(runtime: IAgentRuntime): Promise<unknown> {
     const client = runtime.getService(SOLANA_SERVICE_NAME) as SolanaService | null;
     if (!client) {
       logger.error('SolanaService not found during static stop');
