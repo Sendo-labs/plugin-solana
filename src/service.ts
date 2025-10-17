@@ -198,7 +198,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
    * @returns A promise that resolves to the user-friendly (decimal-adjusted) balance of the asset held.
    */
   public async getBalance(assetAddress: string, owner?: string): Promise<number> {
-    const ownerAddress: string | undefined = owner || (await this.getPublicKey()?.toBase58());
+    const ownerAddress: string | undefined = owner || (this.getPublicKey()?.toBase58());
     if (!ownerAddress) {
       return -1
     }
