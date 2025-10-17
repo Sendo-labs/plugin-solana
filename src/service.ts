@@ -224,10 +224,57 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
     return balance
   }
 
-  async transferSol(from: any, to: any, lamports: number): Promise<string> {
-    return ''
-  }
+  /**
+   * Transfers SOL from a specified keypair to a public key.
+   * The service's own wallet is used to pay transaction fees.
+   * @param {Keypair} from - The keypair of the account to send SOL from.
+   * @param {PublicKey} to - The public key of the account to send SOL to.
+   * @param {number} lamports - The amount of SOL to send, in lamports.
+   * @returns {Promise<string>} The transaction signature.
+   * @throws {Error} If the transfer fails.
+   */
+  public async transferSol(from: Keypair, to: PublicKey, lamports: number): Promise<string> {
+    try {
+      if (!this.servicePublicKey) {
+        throw new Error(
+          'SolanaService is not initialized with a fee payer key, cannot send transaction.'
+        );
+      }
 
+      const transaction = new TransactionMessage({
+        payerKey: this.servicePublicKey,
+        recentBlockhash: (await this.connection.getLatestBlockhash()).blockhash,
+        instructions: [
+          SystemProgram.transfer({
+            fromPubkey: from.publicKey,
+            toPubkey: to,
+            lamports: lamports,
+          }),
+        ],
+      }).compileToV0Message();
+
+      const versionedTransaction = new VersionedTransaction(transaction);
+
+      const serviceKeypair = await this.getServiceKeypair();
+      versionedTransaction.sign([from, serviceKeypair]);
+
+      const signature = await this.connection.sendTransaction(versionedTransaction, {
+        skipPreflight: false,
+      });
+
+      const confirmation = await this.connection.confirmTransaction(signature, 'confirmed');
+      if (confirmation.value.err) {
+        throw new Error(
+          `Transaction confirmation failed: ${JSON.stringify(confirmation.value.err)}`
+        );
+      }
+
+      return signature;
+    } catch (error: unknown) {
+      logger.error('SolanaService: transferSol failed:', error);
+      throw error;
+    }
+  }
   //
   // MARK: End IWalletService
   //
@@ -575,7 +622,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
    * @returns A Promise that resolves to an object containing the prices of SOL, BTC, and ETH tokens.
    */
   private async fetchPrices(): Promise<Prices> {
-    const cacheKey = 'prices';
+    const cacheKey = 'prices_sol_btc_eth';
     const cachedValue = await this.runtime.getCache<Prices>(cacheKey);
 
     // if cachedValue is JSON, parse it
@@ -1581,7 +1628,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
      * @throws {Error} If private key is not available
      */
     private async getWalletKeypair(): Promise<Keypair> {
-      const { keypair } = await getWalletKey(this.runtime, true);
+      const keypair = this.publicKey;
       if (!keypair) {
         throw new Error('Failed to get wallet keypair');
       }
@@ -1892,7 +1939,6 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
       //console.log('walletAddressArr', walletAddressArr)
       const publicKeyObjs = walletAddressArr.map(k => new PublicKey(k));
       //console.log('getBalancesByAddrs - getMultipleAccountsInfo')
-      //const accounts = await this.connection.getMultipleAccountsInfo(publicKeyObjs);
       const accounts = await this.batchGetMultipleAccountsInfo(publicKeyObjs, 'getBalancesByAddrs');
 
       //console.log('getBalancesByAddrs - accounts', accounts)
@@ -1975,6 +2021,88 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
   //
   // MARK: wallet Associated Token Account (ATA)
   //
+
+  // single wallet, list of tokens
+  public async getWalletBalances(publicKeyStr: string, mintAddresses: string[]): Promise<{
+    amount: string;
+    decimals: number;
+    uiAmount: number;
+  } | null> {
+
+    const owner = new PublicKey(publicKeyStr);
+    const mints = mintAddresses.map(m => new PublicKey(m));
+
+    // 1) Derive ATAs for both programs
+    const ataPairs = mints.map(mint => {
+      const ataLegacy = getAssociatedTokenAddressSync(
+        mint, owner, false, TOKEN_PROGRAM_ID
+      );
+      const ata2022 = getAssociatedTokenAddressSync(
+        mint, owner, false, TOKEN_2022_PROGRAM_ID
+      );
+      return { mint, ataLegacy, ata2022 };
+    });
+
+    // 2) Batch fetch token accounts (both program ATAs)
+    const allAtaAddrs = ataPairs.flatMap(p => [p.ataLegacy, p.ata2022]);
+    const ataInfos = await this.batchGetMultipleAccountsInfo(allAtaAddrs, 'getWalletBalances');
+
+    // 3) Batch fetch mint accounts (for decimals)
+    //const mintInfos = await getMultiple(connection, mints, opts?.commitment);
+    const mintInfos = await this.batchGetMultipleAccountsInfo(mints, 'getWalletBalances');
+
+    // 4) Build quick lookups
+    const mintDecimals = new Map<string, number>();
+    mints.forEach((mintPk, i) => {
+      const acc = mintInfos[i];
+      if (!acc) return;
+      // MintLayout.decode expects acc.data to be a Buffer of correct length
+      const mintData = MintLayout.decode(acc.data);
+      mintDecimals.set(mintPk.toBase58(), mintData.decimals);
+    });
+
+    const byAddress = new Map<string, ReturnType<typeof AccountLayout.decode> | null>();
+    allAtaAddrs.forEach((ata, i) => {
+      const info = ataInfos[i];
+      if (!info) {
+        byAddress.set(ata.toBase58(), null);
+        return;
+      }
+      byAddress.set(ata.toBase58(), AccountLayout.decode(info.data));
+    });
+
+    // 5) Assemble balances; prefer legacy program over 2022 if both exist
+    const out: Record<string, MintBalance | null> = {};
+
+    for (const { mint, ataLegacy, ata2022 } of ataPairs) {
+      const mintStr = mint.toBase58();
+      const decimals = mintDecimals.get(mintStr);
+      // If we don’t know decimals (mint account not found), we can’t compute uiAmount
+      if (decimals === undefined) {
+        out[mintStr] = null;
+        continue;
+      }
+
+      const legacy = byAddress.get(ataLegacy.toBase58());
+      const tok2022 = byAddress.get(ata2022.toBase58());
+
+      // Choose which token account to use:
+      const chosen = legacy ?? tok2022;
+      if (!chosen) {
+        out[mintStr] = null; // ATA doesn’t exist → zero balance
+        continue;
+      }
+
+      // AccountLayout amount is a u64 in little-endian buffer
+      const rawAmount = BigInt(chosen.amount.toString()); // AccountLayout already gives a BN-like
+      const amountStr = rawAmount.toString();
+      const uiAmount = Number(rawAmount) / 10 ** decimals;
+
+      out[mintStr] = { amount: amountStr, decimals, uiAmount };
+    }
+
+    return out;
+  }
 
   // 5 calls to get a balance for 500 wallets
   public async getTokenBalanceForWallets(mint: PublicKey, walletAddresses: string[]): Promise<Record<string, number>> {
@@ -2578,7 +2706,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
         (swapResponses as any)[pubKey] = {
           success: true,
           outAmount,
-          outDecimal: await this.getDecimal(signal.targetTokenCA),
+          outDecimal: await this.getDecimal(new PublicKey(signal.targetTokenCA)),
           signature: txid,
           fees,
           swapResponse,
