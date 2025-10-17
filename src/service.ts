@@ -186,7 +186,13 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
     const wp: WalletPortfolio = await this.updateWalletData(true)
     const out: siWalletPortfolio = {
       totalValueUsd: parseFloat(wp.totalUsd),
-      assets: []
+      assets: wp.items.map(i => ({
+        address: i.address,
+        symbol: i.symbol,
+        balance: Number(i.uiAmount ?? 0),
+        decimals: i.decimals,
+        valueUsd: Number(i.valueUsd ?? 0),
+      })),
     }
     return out;
   }
