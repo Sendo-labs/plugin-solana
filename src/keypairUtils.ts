@@ -44,14 +44,14 @@ export async function getWalletKey(
       const secretKey = bs58.decode(privateKeyString);
       return { keypair: Keypair.fromSecretKey(secretKey) };
     } catch (e) {
-      logger.log('Error decoding base58 private key:', e);
+      logger.log({ e }, 'Error decoding base58 private key:');
       try {
         // Then try base64
         logger.log('Try decoding base64 instead');
         const secretKey = Uint8Array.from(Buffer.from(privateKeyString, 'base64'));
         return { keypair: Keypair.fromSecretKey(secretKey) };
       } catch (e2) {
-        logger.error('Error decoding private key: ', e2);
+        logger.error({ e: e2 }, 'Error decoding private key: ');
         throw new Error('Invalid private key format');
       }
     }
