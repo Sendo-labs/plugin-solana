@@ -29,11 +29,11 @@ export const solanaEnvSchema = z
   .and(
     z.union([
       z.object({
-        SOLANA_PRIVATE_KEY: z.string().min(1, 'Solana secret key is required'),
+        SOLANA_PRIVATE_KEY: z.string().min(1).optional(),
         SOLANA_PUBLIC_KEY: z.string().min(1, 'Solana public key is required'),
       }),
       z.object({
-        SOLANA_SECRET_SALT: z.string().min(1, 'Solana secret salt is required'),
+        SOLANA_SECRET_SALT: z.string().min(1).optional(),
       }),
     ])
   )
