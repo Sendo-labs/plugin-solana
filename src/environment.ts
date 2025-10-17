@@ -77,7 +77,7 @@ export async function validateSolanaConfig(runtime: IAgentRuntime): Promise<Sola
     return solanaEnvSchema.parse(config);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      const errorMessages = error.errors
+      const errorMessages = error.issues
         .map((err) => `${err.path.join('.')}: ${err.message}`)
         .join('\n');
       throw new Error(`Solana configuration validation failed:\n${errorMessages}`);
