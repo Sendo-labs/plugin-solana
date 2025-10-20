@@ -45,7 +45,9 @@ export const solanaPlugin: Plugin = {
         service: SOLANA_SERVICE_NAME,
       };
       traderChainService.registerChain(me);
-    })
+    }).catch(error => {
+      runtime.logger.error({ error },'Failed to register with INTEL_CHAIN');
+    });
 
   },
 };
