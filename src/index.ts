@@ -9,14 +9,14 @@ import transferToken from './actions/transfer';
 import { walletProvider } from './providers/wallet';
 
 // service
-import { SolanaService } from './service';
+import { SolanaService, SolanaWalletService } from './service';
 
 import { SOLANA_SERVICE_NAME } from './constants';
 
 export const solanaPlugin: Plugin = {
   name: SOLANA_SERVICE_NAME,
   description: 'Solana blockchain plugin',
-  services: [SolanaService],
+  services: [SolanaService, SolanaWalletService],
   init: async (_, runtime: IAgentRuntime) => {
 
     // Validation
@@ -53,5 +53,5 @@ export default solanaPlugin;
 
 // Export additional items for use by other plugins
 export { SOLANA_SERVICE_NAME } from './constants';
-export { SolanaService } from './service';
+export { SolanaService, SolanaWalletService } from './service';
 export type { SolanaService as ISolanaService } from './service';
