@@ -8,11 +8,14 @@ import {
   SendTransactionError,
   LAMPORTS_PER_SOL,
   type AccountInfo,
+  SystemProgram,
+  Transaction,
+  TransactionMessage,
 } from '@solana/web3.js';
 import {
   MintLayout, getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, unpackAccount,
   getAssociatedTokenAddressSync, ExtensionType, getExtensionData, getExtensionTypes,
-  unpackMint,
+  unpackMint, AccountLayout
 } from "@solana/spl-token";
 // parses the raw Token-2022 metadata struct
 import { unpack as unpackToken2022Metadata } from '@solana/spl-token-metadata';
@@ -34,6 +37,14 @@ const PROVIDER_CONFIG = {
     ETH: '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',
   },
 };
+
+export type MintBalance = {
+  amount: string;
+  decimals: number;
+  uiAmount: number;
+};
+
+
 
 const METADATA_PROGRAM_ID = new PublicKey(
   'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s' // Metaplex Token Metadata Program ID
@@ -91,14 +102,168 @@ export interface ISolanaPluginServiceAPI extends Service {
   getPublicKey: () => PublicKey | null; // Returns base58 public key
 }
 
+// split out off to keep this wrapper simple, so we can move it out of here
+// it's a single unit focused on one thing (reduce scope of main service)
+export class SolanaWalletService extends IWalletService {
+  private solanaService: SolanaService;
+
+  constructor(runtime?: IAgentRuntime) {
+    if (!runtime) throw new Error('runtime is required for solana service')
+    super(runtime);
+    // start / stop?
+    // link to main service...
+    this.solanaService = runtime.getService('chain_solana') as SolanaService;
+    if (!this.solanaService) throw new Error('Solana Service is required for Solana Wallet Service')
+  }
+
+  /**
+   * Retrieves the entire portfolio of assets held by the wallet.
+   * @param owner - Optional: The specific wallet address/owner to query.
+   * @returns A promise that resolves to the wallet's portfolio.
+   */
+  public async getPortfolio(owner?: string): Promise<siWalletPortfolio> {
+    if (owner && owner !== this.solanaService.getPublicKey()?.toBase58()) {
+      throw new Error(
+        `This SolanaService instance can only get the portfolio for its configured wallet: ${this.solanaService.getPublicKey()?.toBase58()}`
+      );
+    }
+    const wp: WalletPortfolio = await this.solanaService.updateWalletData(true)
+    const out: siWalletPortfolio = {
+      totalValueUsd: parseFloat(wp.totalUsd),
+      assets: wp.items.map(i => ({
+        address: i.address,
+        symbol: i.symbol,
+        balance: '' + Number(i.uiAmount ?? 0),
+        decimals: i.decimals,
+        valueUsd: Number(i.valueUsd ?? 0),
+      })),
+    }
+    return out;
+  }
+
+  /**
+   * Retrieves the balance of a specific asset in the wallet.
+   * @param assetAddress - The mint address or native identifier ('SOL') of the asset.
+   * @param owner - Optional: The specific wallet address/owner to query.
+   * @returns A promise that resolves to the user-friendly (decimal-adjusted) balance of the asset held.
+   */
+  public async getBalance(assetAddress: string, owner?: string): Promise<number> {
+    const ownerAddress: string | undefined = owner || (this.solanaService.getPublicKey()?.toBase58());
+    if (!ownerAddress) {
+      return -1
+    }
+    if (
+      assetAddress.toUpperCase() === 'SOL' ||
+      assetAddress === PROVIDER_CONFIG.TOKEN_ADDRESSES.SOL
+    ) {
+      //return this.getSolBalance(ownerAddress);
+      const balances = await this.solanaService.getBalancesByAddrs([ownerAddress])
+      const balance = balances[ownerAddress]
+      return balance
+    }
+    //const tokenBalance = await this.getTokenBalance(ownerAddress, assetAddress);
+    //return tokenBalance?.uiAmount || 0;
+    const tokenBalances: any = await this.solanaService.getTokenAccountsByKeypairs([ownerAddress])
+    const balance: number = tokenBalances[ownerAddress]?.balanceUi || 0
+    return balance
+  }
+
+  /**
+   * Transfers SOL from a specified keypair to a public key.
+   * The service's own wallet is used to pay transaction fees.
+   * @param {Keypair} from - The keypair of the account to send SOL from.
+   * @param {PublicKey} to - The public key of the account to send SOL to.
+   * @param {number} lamports - The amount of SOL to send, in lamports.
+   * @returns {Promise<string>} The transaction signature.
+   * @throws {Error} If the transfer fails.
+   */
+  public async transferSol(from: Keypair, to: PublicKey, lamports: number): Promise<string> {
+    try {
+      const payerKey = this.solanaService.getPublicKey()
+      if (!payerKey || payerKey === null) {
+        throw new Error(
+          'SolanaService is not initialized with a fee payer key, cannot send transaction.'
+        );
+      }
+      const connection = this.solanaService.getConnection()
+
+      const transaction = new TransactionMessage({
+        payerKey,
+        recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
+        instructions: [
+          SystemProgram.transfer({
+            fromPubkey: from.publicKey,
+            toPubkey: to,
+            lamports: lamports,
+          }),
+        ],
+      }).compileToV0Message();
+
+      const versionedTransaction = new VersionedTransaction(transaction);
+
+      const serviceKeypair = await this.solanaService.getWalletKeypair()
+      versionedTransaction.sign([from, serviceKeypair]);
+
+      const signature = await connection.sendTransaction(versionedTransaction, {
+        skipPreflight: false,
+      });
+
+      const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+      if (confirmation.value.err) {
+        throw new Error(
+          `Transaction confirmation failed: ${JSON.stringify(confirmation.value.err)}`
+        );
+      }
+
+      return signature;
+    } catch (error: unknown) {
+      this.runtime.logger.error({ error },'SolanaService: transferSol failed');
+      throw error;
+    }
+  }
+
+  /**
+   * Starts the Solana wallet service with the given agent runtime.
+   *
+   * @param {IAgentRuntime} runtime - The agent runtime to use for the Solana service.
+   * @returns {Promise<SolanaService>} The initialized Solana service.
+   */
+  static async start(runtime: IAgentRuntime): Promise<Service> {
+    runtime.logger.log(`SolanaWalletService start for ${runtime.character.name}`);
+
+    const solanaWalletService = new SolanaWalletService(runtime);
+    return solanaWalletService;
+  }
+
+  /**
+   * Stops the Solana wallet service.
+   *
+   * @param {IAgentRuntime} runtime - The agent runtime.
+   * @returns {Promise<void>} - A promise that resolves once the Solana service has stopped.
+   */
+  static async stop(runtime: IAgentRuntime): Promise<unknown> {
+    const client = runtime.getService(ServiceType.WALLET) as SolanaService | null;
+    if (!client) {
+      logger.error('SolanaWalletService not found during static stop');
+      return;
+    }
+    await client.stop();
+  }
+
+  /**
+   * @returns {Promise<void>} A Promise that resolves when the update interval is stopped.
+   */
+  async stop(): Promise<void> {
+  }
+}
+
 /**
  * Service class for interacting with the Solana blockchain and accessing wallet data.
  * @extends Service
  */
-export class SolanaService extends IWalletService implements ISolanaPluginServiceAPI {
-  readonly serviceName = SOLANA_SERVICE_NAME;
-  //static override readonly serviceType = ServiceType.WALLET;
-  //static serviceType: string = SOLANA_SERVICE_NAME;
+// implements ISolanaPluginServiceAPI
+export class SolanaService extends Service {
+  static override readonly serviceType: string = SOLANA_SERVICE_NAME;
   public readonly capabilityDescription =
     ('The agent is able to interact with the Solana blockchain, and has access to the wallet data' as unknown as typeof IWalletService.prototype.capabilityDescription);
 
@@ -106,6 +271,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
   private readonly UPDATE_INTERVAL = 2 * 60_000; // 2 minutes
   private connection: Connection;
   private publicKey: PublicKey | null = null;
+  private keypair: Keypair | null = null;
   private exchangeRegistry: Record<number, any> = {};
   // probably should be an array of numbers?
   private subscriptions: Map<string, number> = new Map();
@@ -131,10 +297,9 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
     if (!runtime) throw new Error('runtime is required for solana service')
     super(runtime);
     this.exchangeRegistry = {};
-    const connection = new Connection(
+    this.connection = new Connection(
       runtime.getSetting('SOLANA_RPC_URL') || PROVIDER_CONFIG.DEFAULT_RPC
     );
-    this.connection = connection;
 
     // jupiter support detection
     // shouldn't even be here...
@@ -143,7 +308,18 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
       this.jupiterService = runtime.getService('JUPITER_SERVICE' as ServiceTypeName) as any;
     })
 
+    getWalletKey(runtime, true)
+      .then(({ keypair }) => {
+        if (keypair) {
+          this.keypair = keypair
+        }
+      }).catch(e => {
+        // no private key
+        // not the end of the world, just somethings should be disabled...
+        runtime.logger.log('no useable solana private key')
+      })
     // Initialize publicKey using getWalletKey
+    // FIXME: promise for this to be ready?
     getWalletKey(runtime, false)
       .then(({ publicKey }) => {
         if (!publicKey) {
@@ -167,117 +343,6 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
       });
     this.subscriptions = new Map();
   }
-
-  //
-  // MARK: IWalletService
-  //
-
-  /**
-   * Retrieves the entire portfolio of assets held by the wallet.
-   * @param owner - Optional: The specific wallet address/owner to query.
-   * @returns A promise that resolves to the wallet's portfolio.
-   */
-  public async getPortfolio(owner?: string): Promise<siWalletPortfolio> {
-    if (owner && owner !== this.publicKey?.toBase58()) {
-      throw new Error(
-        `This SolanaService instance can only get the portfolio for its configured wallet: ${this.publicKey?.toBase58()}`
-      );
-    }
-    const wp: WalletPortfolio = await this.updateWalletData(true)
-    const out: siWalletPortfolio = {
-      totalValueUsd: parseFloat(wp.totalUsd),
-      assets: wp.items.map(i => ({
-        address: i.address,
-        symbol: i.symbol,
-        balance: Number(i.uiAmount ?? 0),
-        decimals: i.decimals,
-        valueUsd: Number(i.valueUsd ?? 0),
-      })),
-    }
-    return out;
-  }
-
-  /**
-   * Retrieves the balance of a specific asset in the wallet.
-   * @param assetAddress - The mint address or native identifier ('SOL') of the asset.
-   * @param owner - Optional: The specific wallet address/owner to query.
-   * @returns A promise that resolves to the user-friendly (decimal-adjusted) balance of the asset held.
-   */
-  public async getBalance(assetAddress: string, owner?: string): Promise<number> {
-    const ownerAddress: string | undefined = owner || (this.getPublicKey()?.toBase58());
-    if (!ownerAddress) {
-      return -1
-    }
-    if (
-      assetAddress.toUpperCase() === 'SOL' ||
-      assetAddress === PROVIDER_CONFIG.TOKEN_ADDRESSES.SOL
-    ) {
-      //return this.getSolBalance(ownerAddress);
-      const balances = await this.getBalancesByAddrs([ownerAddress])
-      const balance = balances[ownerAddress]
-      return balance
-    }
-    //const tokenBalance = await this.getTokenBalance(ownerAddress, assetAddress);
-    //return tokenBalance?.uiAmount || 0;
-    const tokenBalances: any = await this.getTokenAccountsByKeypairs([ownerAddress])
-    const balance: number = tokenBalances[ownerAddress]?.balanceUi || 0
-    return balance
-  }
-
-  /**
-   * Transfers SOL from a specified keypair to a public key.
-   * The service's own wallet is used to pay transaction fees.
-   * @param {Keypair} from - The keypair of the account to send SOL from.
-   * @param {PublicKey} to - The public key of the account to send SOL to.
-   * @param {number} lamports - The amount of SOL to send, in lamports.
-   * @returns {Promise<string>} The transaction signature.
-   * @throws {Error} If the transfer fails.
-   */
-  public async transferSol(from: Keypair, to: PublicKey, lamports: number): Promise<string> {
-    try {
-      if (!this.servicePublicKey) {
-        throw new Error(
-          'SolanaService is not initialized with a fee payer key, cannot send transaction.'
-        );
-      }
-
-      const transaction = new TransactionMessage({
-        payerKey: this.servicePublicKey,
-        recentBlockhash: (await this.connection.getLatestBlockhash()).blockhash,
-        instructions: [
-          SystemProgram.transfer({
-            fromPubkey: from.publicKey,
-            toPubkey: to,
-            lamports: lamports,
-          }),
-        ],
-      }).compileToV0Message();
-
-      const versionedTransaction = new VersionedTransaction(transaction);
-
-      const serviceKeypair = await this.getServiceKeypair();
-      versionedTransaction.sign([from, serviceKeypair]);
-
-      const signature = await this.connection.sendTransaction(versionedTransaction, {
-        skipPreflight: false,
-      });
-
-      const confirmation = await this.connection.confirmTransaction(signature, 'confirmed');
-      if (confirmation.value.err) {
-        throw new Error(
-          `Transaction confirmation failed: ${JSON.stringify(confirmation.value.err)}`
-        );
-      }
-
-      return signature;
-    } catch (error: unknown) {
-      logger.error('SolanaService: transferSol failed:', error);
-      throw error;
-    }
-  }
-  //
-  // MARK: End IWalletService
-  //
 
   /**
    * Retrieves the connection object.
@@ -1627,8 +1692,8 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
      * @returns {Promise<Keypair>} The wallet keypair
      * @throws {Error} If private key is not available
      */
-    private async getWalletKeypair(): Promise<Keypair> {
-      const keypair = this.publicKey;
+    public async getWalletKeypair(): Promise<Keypair> {
+      const keypair = this.keypair;
       if (!keypair) {
         throw new Error('Failed to get wallet keypair');
       }
@@ -1649,7 +1714,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
      * @param {boolean} [force=false] - Whether to force update the wallet data even if the update interval has not passed
      * @returns {Promise<WalletPortfolio>} The updated wallet portfolio information
      */
-    private async updateWalletData(force = false): Promise<WalletPortfolio> {
+    public async updateWalletData(force = false): Promise<WalletPortfolio> {
       //console.log('updateWalletData - start')
       const now = Date.now();
 
@@ -1846,7 +1911,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
       const balance = Number(amountRaw) / (10 ** decimals);
       const symbol = await solanaService.getTokenSymbol(ca);
 */
-  public async getTokenAccountsByKeypair(walletAddress: PublicKey, options: { notOlderThan?: number; includeZeroBalances?: boolean; } = {}) {
+  public async getTokenAccountsByKeypair(walletAddress: PublicKey, options: { notOlderThan?: number; includeZeroBalances?: boolean; } = {}): Promise<unknown[]> {
     //console.log('getTokenAccountsByKeypair', walletAddress.toString())
     //console.log('publicKey', this.publicKey, 'vs', walletAddress)
     const key = 'solana_' + walletAddress.toString() + '_tokens'
@@ -1914,8 +1979,13 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
     }
   }
 
-  public async getTokenAccountsByKeypairs(walletAddresses: string[], options = {}) {
-    return Promise.all(walletAddresses.map(a => this.getTokenAccountsByKeypair(new PublicKey(a), options)))
+  public async getTokenAccountsByKeypairs(walletAddresses: string[], options = {}): Promise<Record<string, unknown[]>> {
+    const res = await Promise.all(walletAddresses.map(a => this.getTokenAccountsByKeypair(new PublicKey(a), options)))
+    const out: Record<string, unknown[]> = {}
+    for(const i in walletAddresses) {
+      out[walletAddresses[i]] = res[i]
+    }
+    return out
   }
 
   // deprecated
@@ -2023,11 +2093,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
   //
 
   // single wallet, list of tokens
-  public async getWalletBalances(publicKeyStr: string, mintAddresses: string[]): Promise<{
-    amount: string;
-    decimals: number;
-    uiAmount: number;
-  } | null> {
+  public async getWalletBalances(publicKeyStr: string, mintAddresses: string[]): Promise<Record<string, MintBalance | null>> {
 
     const owner = new PublicKey(publicKeyStr);
     const mints = mintAddresses.map(m => new PublicKey(m));
@@ -2727,7 +2793,7 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
    * @returns {Promise<SolanaService>} The initialized Solana service.
    */
   static async start(runtime: IAgentRuntime): Promise<Service> {
-    logger.log(`SolanaService start for ${runtime.character.name}`);
+    runtime.logger.log(`SolanaService start for ${runtime.character.name}`);
 
     const solanaService = new SolanaService(runtime);
     return solanaService;
@@ -2742,14 +2808,14 @@ export class SolanaService extends IWalletService implements ISolanaPluginServic
   static async stop(runtime: IAgentRuntime): Promise<unknown> {
     const client = runtime.getService(SOLANA_SERVICE_NAME) as SolanaService | null;
     if (!client) {
-      logger.error('SolanaService not found during static stop');
+      runtime.logger.error('SolanaService not found during static stop');
       return;
     }
     await client.stop();
   }
 
   /**
-   * Stops the update interval if it is currently running.
+   * Cleans up subscriptions
    * @returns {Promise<void>} A Promise that resolves when the update interval is stopped.
    */
   async stop(): Promise<void> {
