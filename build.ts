@@ -5,7 +5,7 @@
 
 import { $ } from "bun";
 
-async function build() {
+async function build(): Promise<void> {
   const totalStart = Date.now();
 
   // Load package.json and auto-generate externals from dependencies
