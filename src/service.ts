@@ -11,6 +11,8 @@ import {
   SystemProgram,
   Transaction,
   TransactionMessage,
+  type RpcResponseAndContext,
+  type ParsedAccountData,
 } from '@solana/web3.js';
 import {
   MintLayout, getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, unpackAccount,
@@ -44,7 +46,20 @@ export type MintBalance = {
   uiAmount: number;
 };
 
+type KeyedParsedTokenAccount = {
+  pubkey: PublicKey;
+  account: AccountInfo<ParsedAccountData>;
+};
 
+type ParsedTokenAccountsResponse = Awaited<ReturnType<Connection['getParsedTokenAccountsByOwner']>>;
+/*
+type ParsedTokenAccountsResponse = Promise<RpcResponseAndContext<
+    Array<{
+      pubkey: PublicKey;
+      account: AccountInfo<ParsedAccountData>;
+    }>
+  >>
+*/
 
 const METADATA_PROGRAM_ID = new PublicKey(
   'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s' // Metaplex Token Metadata Program ID
@@ -163,9 +178,18 @@ export class SolanaWalletService extends IWalletService {
     }
     //const tokenBalance = await this.getTokenBalance(ownerAddress, assetAddress);
     //return tokenBalance?.uiAmount || 0;
-    const tokenBalances: any = await this.solanaService.getTokenAccountsByKeypairs([ownerAddress])
-    const balance: number = tokenBalances[ownerAddress]?.balanceUi || 0
-    return balance
+    const tokensBalances: Record<string, KeyedParsedTokenAccount[]> = await this.solanaService.getTokenAccountsByKeypairs([ownerAddress])
+    const heldTokens = tokensBalances[ownerAddress] || []
+    for(const t of heldTokens) {
+      //const decimals = t.account.data.parsed.info.tokenAmount.decimals;
+      //const balance = Number(amountRaw) / (10 ** decimals);
+      //const ca = new PublicKey(t.account.data.parsed.info.mint);
+      if (t.account.data.parsed.info.mint === assetAddress) {
+        return t.account.data.parsed.info.tokenAmount.balanceUi;
+      }
+    }
+    this.runtime.logger.log('could not find', assetAddress, 'in', heldTokens)
+    return -1
   }
 
   /**
@@ -1911,7 +1935,7 @@ export class SolanaService extends Service {
       const balance = Number(amountRaw) / (10 ** decimals);
       const symbol = await solanaService.getTokenSymbol(ca);
 */
-  public async getTokenAccountsByKeypair(walletAddress: PublicKey, options: { notOlderThan?: number; includeZeroBalances?: boolean; } = {}): Promise<unknown[]> {
+  public async getTokenAccountsByKeypair(walletAddress: PublicKey, options: { notOlderThan?: number; includeZeroBalances?: boolean; } = {}): Promise<KeyedParsedTokenAccount[]> {
     //console.log('getTokenAccountsByKeypair', walletAddress.toString())
     //console.log('publicKey', this.publicKey, 'vs', walletAddress)
     const key = 'solana_' + walletAddress.toString() + '_tokens'
@@ -1937,7 +1961,7 @@ export class SolanaService extends Service {
       }
       console.log('getTokenAccountsByKeypair - getParsedTokenAccountsByOwner', walletAddress.toString())
 
-      const [accounts, token2022s]: [any, any] = await Promise.all([
+      const [accounts, token2022s]: [ParsedTokenAccountsResponse, ParsedTokenAccountsResponse] = await Promise.all([
         this.connection.getParsedTokenAccountsByOwner(walletAddress, {
           programId: TOKEN_PROGRAM_ID, // original SPL
         }),
@@ -1950,10 +1974,10 @@ export class SolanaService extends Service {
       //console.log('haveToken22s', haveToken22s)
       //for(const t of token2022s.value) { console.log('t2022 account.data', t.account.data) }
       //const haveTokens = accounts.value.filter(account => account.account.data.parsed.info.tokenAmount.amount !== '0')
-      const allTokens = [...token2022s.value, ...accounts.value]
+      const allTokens: KeyedParsedTokenAccount[] = [...token2022s.value, ...accounts.value]
 
       // update decimalCache
-      const haveAllTokens = []
+      const haveAllTokens: KeyedParsedTokenAccount[] = []
       for(const t of allTokens) {
         const { amount, decimals } = t.account.data.parsed.info.tokenAmount;
         this.decimalsCache.set(t.account.data.parsed.info.mint, decimals);
@@ -1979,9 +2003,9 @@ export class SolanaService extends Service {
     }
   }
 
-  public async getTokenAccountsByKeypairs(walletAddresses: string[], options = {}): Promise<Record<string, unknown[]>> {
+  public async getTokenAccountsByKeypairs(walletAddresses: string[], options = {}): Promise<Record<string, KeyedParsedTokenAccount[]>> {
     const res = await Promise.all(walletAddresses.map(a => this.getTokenAccountsByKeypair(new PublicKey(a), options)))
-    const out: Record<string, unknown[]> = {}
+    const out: Record<string, KeyedParsedTokenAccount[]> = {}
     for(const i in walletAddresses) {
       out[walletAddresses[i]] = res[i]
     }
@@ -2277,6 +2301,7 @@ export class SolanaService extends Service {
       }
 
       await this.connection.removeAccountChangeListener(subscriptionId);
+      this.subscriptions.delete(accountAddress);
 
       return true;
     } catch (error) {
