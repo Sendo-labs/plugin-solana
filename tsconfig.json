@@ -16,14 +16,14 @@
     "declarationDir": "dist",
     "emitDeclarationOnly": true,
 
-    // *** Bun types only ***
-    "types": ["bun"],
+    // *** Bun types + Node types for build script ***
+    "types": ["bun", "node"],
 
     // Nice-to-haves for Bun + bundlers
     "allowImportingTsExtensions": true,
     "moduleDetection": "force",
     "allowArbitraryExtensions": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "build.ts"],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
 }
