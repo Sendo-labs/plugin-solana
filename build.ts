@@ -3,24 +3,20 @@
  * Build script for @elizaos/plugin-solana
  */
 
-const externalDeps = [
-  "@elizaos/core",
-  "@elizaos/service-interfaces",
-  "dotenv",
-  "@reflink/reflink",
-  "@node-llama-cpp",
-  "agentkeepalive",
-  "safe-buffer",
-  "base-x",
-  "bs58",
-  "borsh",
-  "@solana/buffer-layout",
-  "querystring",
-  "zod",
-];
+import { $ } from "bun";
 
 async function build() {
   const totalStart = Date.now();
+
+  // Load package.json and auto-generate externals from dependencies
+  const pkg = await Bun.file("package.json").json();
+  const externalDeps = [
+    ...Object.keys(pkg.dependencies ?? {}),
+    ...Object.keys(pkg.peerDependencies ?? {}),
+  ];
+
+  // Clean previous build
+  await $`rm -rf dist`;
 
   // ESM build
   const esmStart = Date.now();
@@ -45,7 +41,6 @@ async function build() {
   // TypeScript declarations
   const dtsStart = Date.now();
   console.log("📝 Generating TypeScript declarations...");
-  const { $ } = await import("bun");
   await $`tsc --project tsconfig.build.json`;
   console.log(
     `✅ Declarations generated in ${((Date.now() - dtsStart) / 1000).toFixed(2)}s`
