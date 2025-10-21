@@ -148,7 +148,7 @@ export class SolanaWalletService extends IWalletService {
       assets: wp.items.map(i => ({
         address: i.address,
         symbol: i.symbol,
-        balance: '' + Number(i.uiAmount ?? 0),
+        balance:  Number(i.uiAmount ?? 0).toString(),
         decimals: i.decimals,
         valueUsd: Number(i.valueUsd ?? 0),
       })),
@@ -2702,8 +2702,8 @@ export class SolanaService extends Service {
 
             if (inBal && outBal) {
               // in will be high than out in this scenario?
-              const lamDiff = (inBal.uiTokenAmount.uiAmount || 0) - (outBal.uiTokenAmount.uiAmount || 0)
-              const diff = Number(inBal.uiTokenAmount.amount || 0) - Number(outBal.uiTokenAmount.amount || 0)
+              const lamDiff = (inBal.uiTokenAmount.uiAmount ?? 0) - (outBal.uiTokenAmount.uiAmount ?? 0)
+              const diff = Number(inBal.uiTokenAmount.amount ?? 0) - Number(outBal.uiTokenAmount.amount ?? 0)
               // we definitely didn't swap for nothing
               if (diff) {
                 outAmount = diff
@@ -2726,8 +2726,8 @@ export class SolanaService extends Service {
 
           } else {
             if (inBal && outBal) {
-              const lamDiff = (outBal.uiTokenAmount.uiAmount || 0) - (inBal.uiTokenAmount.uiAmount || 0)
-              const diff = Number(outBal.uiTokenAmount.amount || 0) - Number(inBal.uiTokenAmount.amount || 0)
+              const lamDiff = (outBal.uiTokenAmount.uiAmount ?? 0) - (inBal.uiTokenAmount.uiAmount ?? 0)
+              const diff = Number(outBal.uiTokenAmount.amount ?? 0) - Number(inBal.uiTokenAmount.amount ?? 0)
               // we definitely didn't swap for nothing
               if (diff) {
                 outAmount = diff
