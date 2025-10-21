@@ -173,7 +173,7 @@ export class SolanaWalletService extends IWalletService {
     ) {
       //return this.getSolBalance(ownerAddress);
       const balances = await this.solanaService.getBalancesByAddrs([ownerAddress])
-      const balance = balances[ownerAddress]
+      const balance = balances[ownerAddress] ?? 0
       return balance
     }
     //const tokenBalance = await this.getTokenBalance(ownerAddress, assetAddress);
@@ -185,7 +185,7 @@ export class SolanaWalletService extends IWalletService {
       //const balance = Number(amountRaw) / (10 ** decimals);
       //const ca = new PublicKey(t.account.data.parsed.info.mint);
       if (t.account.data.parsed.info.mint === assetAddress) {
-        return t.account.data.parsed.info.tokenAmount.balanceUi;
+        return t.account.data.parsed.info.tokenAmount.uiAmount;
       }
     }
     this.runtime.logger.log('could not find', assetAddress, 'in', heldTokens)
@@ -518,54 +518,31 @@ export class SolanaService extends Service {
 
   // deprecate
   async getAddressType(address: string): Promise<string> {
-    let dataLength = -1
-    try {
-      const key = 'solana_' + address + '_addressType'
-      const check = await this.runtime.getCache<any>(key)
-      if (check) {
-        console.log('getAddressType - HIT')
-        return check
-      }
-
-      const pubkey = new PublicKey(address);
-      console.log('getAddressType - getAccountInfo')
-      const accountInfo = await this.connection.getAccountInfo(pubkey);
-
-      if (!accountInfo) {
-        return 'Account does not exist';
-      }
-
-      //console.log('accountInfo', accountInfo)
-
-      dataLength = accountInfo.data.length;
-
-      if (dataLength === 0) {
-        await this.runtime.setCache<any>(key, 'Wallet')
-        return 'Wallet';
-      }
-
-      // SPL Token accounts are always 165 bytes
-      // User's balance of a specified token
-      if (dataLength === SolanaService.TOKEN_ACCOUNT_DATA_LENGTH) {
-        await this.runtime.setCache<any>(key, 'Token Account')
-        return 'Token Account';
-      }
-
-      // Token mint account
-      if (dataLength === SolanaService.TOKEN_MINT_DATA_LENGTH) {
-        await this.runtime.setCache<any>(key, 'Token')
-        return 'Token';
-      }
-    } catch(e) {
-      // likely bad address
-      console.error('solsrv:getAddressType - err', e)
-    }
-    return `Unknown (Data length: ${dataLength})`;
+    const types = await this.getAddressesTypes([address])
+    return types[address]
   }
 
-  async getAddressesTypes(addresses: string[]) {
-    // FIXME: use batchGetMultipleAccountsInfo to efficiently check multiple
-    return Promise.all(addresses.map(a => this.getAddressType(a)))
+  async getAddressesTypes(addresses: string[]): Promise<Record<string, string>> {
+    const pubkeys = addresses.map(a => new PublicKey(a));
+    const infos = await this.batchGetMultipleAccountsInfo(pubkeys, 'getAddressesTypes');
+
+    const resultList: string[] = addresses.map((addr, i) => {
+      const info = infos[i];
+      if (!info) return 'Account does not exist';
+      const dataLength = info.data.length;
+      if (dataLength === 0) return 'Wallet';
+      if (dataLength === SolanaService.TOKEN_ACCOUNT_DATA_LENGTH) return 'Token Account';
+      if (dataLength === SolanaService.TOKEN_MINT_DATA_LENGTH) return 'Token';
+      return `Unknown (Data length: ${dataLength})`;
+    });
+
+    const out: Record<string, string> = {}
+    for(const i in addresses) {
+      const addr = addresses[i]
+      out[addr] = resultList[i]
+    }
+
+    return out
   }
 
   /**
