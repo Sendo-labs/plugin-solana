@@ -1,6 +1,7 @@
 import {
   type Action,
   type ActionExample,
+  type ActionResult,
   type HandlerCallback,
   type IAgentRuntime,
   type Memory,
@@ -72,11 +73,11 @@ async function swapToken(
     const amountBN = new BigNumber(amount);
     const adjustedAmount = amountBN.multipliedBy(new BigNumber(10).pow(decimals));
 
-    logger.log('Fetching quote with params:', {
+    logger.log({
       inputMint: inputTokenCA,
       outputMint: outputTokenCA,
       amount: adjustedAmount,
-    });
+    }, 'Fetching quote with params:');
 
     const quoteResponse = await fetch(
       `https://quote-api.jup.ag/v6/quote?inputMint=${inputTokenCA}&outputMint=${outputTokenCA}&amount=${adjustedAmount}&dynamicSlippage=true&maxAccounts=64`
@@ -86,7 +87,7 @@ async function swapToken(
     };
 
     if (!quoteData || quoteData.error) {
-      logger.error('Quote error:', quoteData);
+      logger.error({ quoteData },'Quote error');
       throw new Error(`Failed to get quote: ${quoteData?.error || 'Unknown error'}`);
     }
 
@@ -113,7 +114,7 @@ async function swapToken(
     };
 
     if (!swapData || !swapData.swapTransaction) {
-      logger.error('Swap error:', swapData);
+      logger.error({ swapData }, 'Swap error');
       throw new Error(
         `Failed to get swap transaction: ${swapData?.error || 'No swap transaction returned'}`
       );
@@ -121,7 +122,7 @@ async function swapToken(
 
     return swapData;
   } catch (error) {
-    logger.error('Error in swapToken:', error);
+    logger.error({ error }, 'Error in swapToken:');
     throw error;
   }
 }
@@ -155,7 +156,7 @@ async function getTokenFromWallet(
 
     return token ? token.address : null;
   } catch (error) {
-    logger.error('Error checking token in wallet:', error);
+    logger.error({ error }, 'Error checking token in wallet');
     return null;
   }
 }
@@ -250,7 +251,7 @@ export const executeSwap: Action = {
     state: State | undefined,
     _options: { [key: string]: unknown } | undefined,
     callback?: HandlerCallback
-  ): Promise<boolean> => {
+  ): Promise<void | ActionResult | undefined> => {
     state = await runtime.composeState(message, ['RECENT_MESSAGES']);
 
     try {
@@ -293,7 +294,7 @@ export const executeSwap: Action = {
           (await getTokenFromWallet(runtime, response.inputTokenSymbol)) || undefined;
         if (!response.inputTokenCA) {
           callback?.({ text: 'Could not find the input token in your wallet' });
-          return false;
+          return;
         }
       }
 
@@ -304,13 +305,13 @@ export const executeSwap: Action = {
           callback?.({
             text: 'Could not find the output token in your wallet',
           });
-          return false;
+          return;
         }
       }
 
       if (!response.amount) {
         callback?.({ text: 'Please specify the amount you want to swap' });
-        return false;
+        return;
       }
 
       const connection = new Connection(
@@ -365,15 +366,15 @@ export const executeSwap: Action = {
         content: { success: true, txid },
       });
 
-      return true;
+      return;
     } catch (error) {
       if (error instanceof Error) {
-        logger.error('Error during token swap:', error);
+        logger.error({ error }, 'Error during token swap');
         callback?.({
           text: `Swap failed: ${error.message}`,
           content: { error: error.message },
         });
-        return false;
+        return;
       }
       throw error;
     }

@@ -1,52 +1,59 @@
-import type { IAgentRuntime, Plugin } from '@elizaos/core';
-import { logger } from '@elizaos/core';
+import type { IAgentRuntime, Plugin, ServiceTypeName } from '@elizaos/core';
+import { parseBooleanFromText } from '@elizaos/core';
+
+// actions
 import { executeSwap } from './actions/swap';
 import transferToken from './actions/transfer';
-import { SOLANA_SERVICE_NAME } from './constants';
+
+// providers
 import { walletProvider } from './providers/wallet';
-import { SolanaService } from './service';
+
+// service
+import { SolanaService, SolanaWalletService } from './service';
+
+import { SOLANA_SERVICE_NAME } from './constants';
 
 export const solanaPlugin: Plugin = {
   name: SOLANA_SERVICE_NAME,
-  description: 'Solana Plugin for Eliza',
-  actions: [transferToken, executeSwap],
-  evaluators: [],
-  providers: [walletProvider],
-  services: [SolanaService],
+  description: 'Solana blockchain plugin',
+  services: [SolanaService, SolanaWalletService],
   init: async (_, runtime: IAgentRuntime) => {
-    logger.debug('solana init');
 
-    new Promise<void>(async (resolve) => {
-      resolve();
-      const asking = 'solana';
-      const serviceType = 'TRADER_CHAIN';
-      const maxRetries = 10;
-      let retries = 0;
+    // Validation
+    if (!runtime.getSetting('SOLANA_RPC_URL')) {
+      runtime.logger.log('no SOLANA_RPC_URL, skipping plugin-solana init')
+      return
+    }
 
-      let traderChainService = runtime.getService(serviceType) as any;
-      while (!traderChainService && retries < maxRetries) {
-        logger.debug(`${asking} waiting for ${serviceType} service... (${retries + 1}/${maxRetries})`);
-        traderChainService = runtime.getService(serviceType) as any;
-        if (!traderChainService) {
-          await new Promise((waitResolve) => setTimeout(waitResolve, 1000));
-          retries++;
-        } else {
-          logger.debug(`${asking} Acquired ${serviceType} service...`);
-        }
-      }
+    const noActions = parseBooleanFromText(runtime.getSetting("SOLANA_NO_ACTIONS"));
+    if (!noActions) {
+      runtime.registerAction(transferToken)
+      runtime.registerAction(executeSwap)
+    } else {
+      runtime.logger.log('SOLANA_NO_ACTIONS is set, skipping solana actions')
+    }
 
-      if (traderChainService) {
-        const me = {
-          name: 'Solana services',
-          chain: 'solana',
-          service: SOLANA_SERVICE_NAME,
-        };
-        traderChainService.registerChain(me);
-        logger.debug('solana init done');
-      } else {
-        logger.debug('solana init done (standalone mode - TRADER_CHAIN service not available)');
-      }
+    runtime.registerProvider(walletProvider)
+
+    // extensions
+    runtime.getServiceLoadPromise('INTEL_CHAIN' as ServiceTypeName).then( () => {
+      //runtime.logger.log('solana INTEL_CHAIN LOADED')
+      const traderChainService = runtime.getService('INTEL_CHAIN') as any;
+      const me = {
+        name: 'Solana services',
+        chain: 'solana',
+        service: SOLANA_SERVICE_NAME,
+      };
+      traderChainService.registerChain(me);
+    }).catch(error => {
+      runtime.logger.error({ error },'Failed to register with INTEL_CHAIN');
     });
+
   },
 };
 export default solanaPlugin;
+
+// Export additional items for use by other plugins
+export { SOLANA_SERVICE_NAME } from './constants';
+export { SolanaService, SolanaWalletService } from './service';
+export type { SolanaService as ISolanaService } from './service';

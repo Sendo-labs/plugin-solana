@@ -1,6 +1,7 @@
 import {
   type Action,
   type ActionExample,
+  type ActionResult,
   type Content,
   type HandlerCallback,
   type IAgentRuntime,
@@ -45,19 +46,18 @@ interface TransferContent extends Content {
  * @param {TransferContent} content - The content to be validated for transfer.
  * @returns {boolean} Returns true if the content is valid for transfer, and false otherwise.
  */
-function isTransferContent(content: TransferContent): boolean {
-  logger.log('Content for transfer', content);
+function isTransferContent(content: unknown): content is TransferContent {
+  if (!content || typeof content !== 'object') return false;
 
+  const c = content as Partial<Record<keyof TransferContent, unknown>>;
   // Base validation
-  if (!content.recipient || typeof content.recipient !== 'string' || !content.amount) {
-    return false;
-  }
+  if (typeof c.recipient !== 'string') return false;
+  if (!(typeof c.amount === 'string' || typeof c.amount === 'number')) return false;
 
-  if (content.tokenAddress === 'null') {
-    content.tokenAddress = null;
-  }
+  // Don’t mutate here; just validate. Treat 'null' as valid string; normalize later.
+  if (c.tokenAddress !== null && typeof c.tokenAddress !== 'string') return false;
 
-  return typeof content.amount === 'string' || typeof content.amount === 'number';
+  return true;
 }
 
 /**
@@ -134,8 +134,8 @@ export default {
     'PAY_TOKENS_SOLANA',
     'PAY_SOLANA',
   ],
-  validate: async (_runtime: IAgentRuntime, message: Memory) => {
-    logger.log('Validating transfer from entity:', message.entityId);
+  validate: async (runtime: IAgentRuntime, message: Memory) => {
+    runtime.logger.log('Validating transfer from entity:', message.entityId);
     return true;
   },
   description: 'Transfer SOL or SPL tokens to another address on Solana.',
@@ -145,7 +145,7 @@ export default {
     state: State,
     _options: { [key: string]: unknown },
     callback?: HandlerCallback
-  ): Promise<boolean> => {
+  ): Promise<void | ActionResult | undefined> => {
     logger.log('Starting TRANSFER handler...');
 
     const transferPrompt = composePromptFromState({
@@ -159,6 +159,16 @@ export default {
 
     const content = parseJSONObjectFromText(result);
 
+    if (!content) {
+      if (callback) {
+        callback({
+          text: 'Need a valid recipient address and amount to transfer.',
+          content: { error: 'Invalid transfer content' },
+        });
+      }
+      return;
+    }
+
     if (!isTransferContent(content)) {
       if (callback) {
         callback({
@@ -166,11 +176,20 @@ export default {
           content: { error: 'Invalid transfer content' },
         });
       }
-      return false;
+      return;
     }
 
     try {
       const { keypair: senderKeypair } = await getWalletKey(runtime, true);
+      if (!senderKeypair) {
+        if (callback) {
+          callback({
+            text: 'Need a valid agent address.',
+            content: { error: 'Invalid transfer content' },
+          });
+        }
+        return;
+      }
       const connection = new Connection(
         runtime.getSetting('SOLANA_RPC_URL') || 'https://api.mainnet-beta.solana.com'
       );
@@ -270,16 +289,22 @@ export default {
         }
       }
 
-      return true;
+      return;
     } catch (error) {
-      logger.error('Error during transfer:', error);
+      logger.error({ error },'Error during transfer');
       if (callback) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : typeof error === 'string'
+            ? error
+            : JSON.stringify(error);
         callback({
-          text: `Transfer failed: ${error.message}`,
-          content: { error: error.message },
+          text: `Transfer failed: ${message}`,
+          content: { error: message },
         });
       }
-      return false;
+      return;
     }
   },
 

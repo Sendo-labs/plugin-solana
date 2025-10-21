@@ -1,4 +1,4 @@
-# @elizaos-plugins/plugin-solana
+# @elizaos/plugin-solana
 
 Core Solana blockchain plugin for Eliza OS that provides essential services and actions for token operations, trading, and DeFi integrations.
 
@@ -55,7 +55,7 @@ The Solana plugin serves as a foundational component of Eliza OS, bridging Solan
 ## Installation
 
 ```bash
-npm install @elizaos-plugins/plugin-solana
+npm install @elizaos/plugin-solana
 ```
 
 ## Configuration
@@ -80,7 +80,7 @@ const solanaEnvSchema = {
 ### Basic Setup
 
 ```typescript
-import { solanaPlugin } from '@elizaos-plugins/plugin-solana';
+import { solanaPlugin } from '@elizaos/plugin-solana';
 
 // Initialize the plugin
 const runtime = await initializeRuntime({

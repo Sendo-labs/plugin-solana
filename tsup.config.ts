@@ -7,7 +7,7 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   strict: true,
-  format: ['esm'], // Ensure you're targeting CommonJS
+  format: ['esm'], // ESM build (Bun-friendly)
   dts: true,
   external: [
     'dotenv', // Externalize dotenv to prevent bundling
