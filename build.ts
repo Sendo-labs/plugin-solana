@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Build script for @elizaos/plugin-bootstrap using standardized build utilities
+ * Build script for @elizaos/plugin-solana using standardized build utilities
  */
 
 import { createBuildRunner } from '../../build-utils';
