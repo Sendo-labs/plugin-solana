@@ -1,0 +1,15 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main  # ou master 
+
+jobs:
+  release:
+    uses: sendo-labs/reusable-workflows/.github/workflows/release.yml@release-workflow-v1.0.0
+    with:
+      release-type: node
+    permissions:
+      contents: write
+      pull-requests: write

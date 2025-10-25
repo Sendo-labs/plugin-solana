@@ -1,0 +1,22 @@
+name: Publish to NPM
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  publish:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release-please--')
+    uses: sendo-labs/reusable-workflows/.github/workflows/npm-publish.yml@npm-publish-workflow-v1.0.0
+    with:
+      bun-version: 'latest'
+      node-version: '22'
+      working-directory: '.'
+      registry-url: 'https://registry.npmjs.org'
+      skip-tests: true
+      skip-build: false
+      access: 'public'
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
