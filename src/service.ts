@@ -120,15 +120,21 @@ export interface ISolanaPluginServiceAPI extends Service {
 // split out off to keep this wrapper simple, so we can move it out of here
 // it's a single unit focused on one thing (reduce scope of main service)
 export class SolanaWalletService extends IWalletService {
-  private solanaService: SolanaService;
+  private _solanaService: SolanaService | null = null;
 
   constructor(runtime?: IAgentRuntime) {
     if (!runtime) throw new Error('runtime is required for solana service')
     super(runtime);
-    // start / stop?
-    // link to main service...
-    this.solanaService = runtime.getService('chain_solana') as SolanaService;
-    if (!this.solanaService) throw new Error('Solana Service is required for Solana Wallet Service')
+  }
+
+  private get solanaService(): SolanaService {
+    if (!this._solanaService) {
+      this._solanaService = this.runtime.getService('chain_solana') as SolanaService;
+      if (!this._solanaService) {
+        throw new Error('Solana Service is required for Solana Wallet Service');
+      }
+    }
+    return this._solanaService;
   }
 
   /**
